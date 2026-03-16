@@ -14,25 +14,25 @@ import models
 
 router = APIRouter()
 
-BLANTYRE       = ZoneInfo("Africa/Blantyre")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+BLANTYRE = ZoneInfo("Africa/Blantyre")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+# ── Ollama AI grading ─────────────────────────────────────────────────────────
+OLLAMA_URL   = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
-
-def call_gemini(prompt: str) -> str:
+def call_ollama(prompt: str) -> str:
     resp = http_requests.post(
-        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-        headers={"Content-Type": "application/json"},
+        OLLAMA_URL,
         json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.2}
         },
-        timeout=60,
+        timeout=300,
     )
     resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    return resp.json()["response"]
 
 
 def fmt_date(dt):
@@ -187,7 +187,7 @@ def submit_essay(
     db.commit()
     db.refresh(submission)
 
-    # ── AI GRADING via Gemini ──
+    # ── AI GRADING via Ollama (llama3) ────────────────────────────────────────
     rubric = json.loads(assignment.rubric) if assignment.rubric else {
         "content": 30, "structure": 25, "grammar": 20,
         "vocabulary": 15, "argumentation": 10
@@ -209,7 +209,7 @@ Grading Rubric (weights):
 
 Student Essay:
 ---
-{essay_text}
+{essay_text[:3000]}
 ---
 
 Respond ONLY in this exact JSON format (no markdown, no extra text):
@@ -218,19 +218,17 @@ Respond ONLY in this exact JSON format (no markdown, no extra text):
     ai_score    = None
     ai_feedback = None
 
-    if GEMINI_API_KEY:
-        try:
-            raw_text = call_gemini(prompt)
-            clean    = raw_text.strip().replace("```json", "").replace("```", "").strip()
-            parsed   = json.loads(clean)
-            if "score" in parsed and "feedback" in parsed:
-                ai_score    = max(0, min(max_score, int(parsed["score"])))
-                ai_feedback = str(parsed["feedback"]).strip()
-                print(f"✅ Gemini graded: {ai_score}/{max_score}")
-        except Exception as e:
-            print(f"❌ Gemini grading failed: {e}")
-    else:
-        print("❌ GEMINI_API_KEY is empty — check your .env file")
+    try:
+        print(f"🤖 Sending essay to Ollama ({OLLAMA_MODEL}) for grading...")
+        raw_text = call_ollama(prompt)
+        clean    = raw_text.strip().replace("```json", "").replace("```", "").strip()
+        parsed   = json.loads(clean)
+        if "score" in parsed and "feedback" in parsed:
+            ai_score    = max(0, min(max_score, int(parsed["score"])))
+            ai_feedback = str(parsed["feedback"]).strip()
+            print(f"✅ Ollama graded: {ai_score}/{max_score}")
+    except Exception as e:
+        print(f"❌ Ollama grading failed: {e}")
 
     new_status = "ai_graded" if ai_score is not None else "submitted"
     submission.ai_score    = ai_score
