@@ -27,4 +27,4 @@ app.include_router(student.router, prefix="/api/student", tags=["Student"])
 
 @app.get("/")
 def root():
-    return {"message": "EssayGrade API is running ✅"}
+    return {"message": "JomboEssayGrade API is running ✅"}
