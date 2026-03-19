@@ -1,3 +1,8 @@
+
+
+
+
+
 # import json
 # import os
 # import re
@@ -447,13 +452,10 @@
 
 
 
-
-
-
-
 import json
 import os
 import re
+import time
 import requests as http_requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -473,8 +475,61 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 HF_API_KEY     = os.getenv("HF_API_KEY", "")
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-HF_URL     = "https://router.huggingface.co/v1/chat/completions"
 
+# ── Multiple HF fallback models — tried in order until one works ──────────────
+# router.huggingface.co returns 500 frequently (their servers, not your code)
+# Having multiple fallbacks means grading works even when 1-2 models are down
+HF_MODELS = [
+    # Model 1 — original working model (try first)
+    {
+        "url":  "https://router.huggingface.co/v1/chat/completions",
+        "body": lambda prompt: {
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 700,
+            "temperature": 0.0,
+        },
+        "parse": lambda data: data["choices"][0]["message"]["content"],
+        "name": "Llama-3.1-8B (router)",
+    },
+    # Model 2 — Qwen via router (very reliable, good at following JSON)
+    {
+        "url":  "https://router.huggingface.co/v1/chat/completions",
+        "body": lambda prompt: {
+            "model": "Qwen/Qwen2.5-72B-Instruct",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 700,
+            "temperature": 0.0,
+        },
+        "parse": lambda data: data["choices"][0]["message"]["content"],
+        "name": "Qwen2.5-72B (router)",
+    },
+    # Model 3 — Mistral via router
+    {
+        "url":  "https://router.huggingface.co/v1/chat/completions",
+        "body": lambda prompt: {
+            "model": "mistralai/Mistral-7B-Instruct-v0.3",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 700,
+            "temperature": 0.0,
+        },
+        "parse": lambda data: data["choices"][0]["message"]["content"],
+        "name": "Mistral-7B-v0.3 (router)",
+    },
+    # Model 4 — Llama 3 via direct inference API (different endpoint as last resort)
+    {
+        "url":  "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct",
+        "body": lambda prompt: {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 512, "temperature": 0.01, "return_full_text": False},
+        },
+        "parse": lambda data: data[0]["generated_text"] if isinstance(data, list) else data.get("generated_text", ""),
+        "name": "Llama-3-8B (inference API)",
+    },
+]
+
+
+# ── AI callers ────────────────────────────────────────────────────────────────
 
 def call_gemini(prompt: str) -> str:
     resp = http_requests.post(
@@ -497,46 +552,69 @@ def call_gemini(prompt: str) -> str:
 
 
 def call_huggingface(prompt: str) -> str:
-    resp = http_requests.post(
-        HF_URL,
-        headers={
-            "Authorization": f"Bearer {HF_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "meta-llama/Llama-3.1-8B-Instruct",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 700,
-            "temperature": 0.0,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    """Try each HF model in order. Returns the first successful response."""
+    last_error = None
+    for model in HF_MODELS:
+        try:
+            print(f"🤖 Trying HF model: {model['name']}...")
+            resp = http_requests.post(
+                model["url"],
+                headers={
+                    "Authorization": f"Bearer {HF_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=model["body"](prompt),
+                timeout=120,
+            )
+            resp.raise_for_status()
+            result = model["parse"](resp.json())
+            if result and result.strip():
+                print(f"✅ {model['name']} responded successfully")
+                return result
+            print(f"⚠️ {model['name']} returned empty response — trying next...")
+        except Exception as e:
+            print(f"⚠️ {model['name']} failed: {e} — trying next...")
+            last_error = e
+
+    raise Exception(f"All HuggingFace models failed. Last error: {last_error}")
 
 
 def grade_with_ai(prompt: str) -> str:
+    """
+    Try Gemini first. On 429 rate limit, wait 65s and retry once.
+    If Gemini still fails, fall back through all HuggingFace models.
+    """
     if GEMINI_API_KEY:
         try:
             print("🤖 Trying Gemini for grading...")
             result = call_gemini(prompt)
             print("✅ Gemini responded successfully")
             return result
+        except http_requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                print("⏳ Gemini 429 rate limit — waiting 65s then retrying...")
+                time.sleep(65)
+                try:
+                    result = call_gemini(prompt)
+                    print("✅ Gemini retry succeeded")
+                    return result
+                except Exception as retry_err:
+                    print(f"⚠️ Gemini retry failed: {retry_err} — trying Hugging Face...")
+            else:
+                print(f"⚠️ Gemini failed: {e} — trying Hugging Face backup...")
         except Exception as e:
             print(f"⚠️ Gemini failed: {e} — trying Hugging Face backup...")
 
     if HF_API_KEY:
         try:
-            print("🤖 Trying Hugging Face backup...")
-            result = call_huggingface(prompt)
-            print("✅ Hugging Face responded successfully")
-            return result
+            return call_huggingface(prompt)
         except Exception as e:
-            print(f"❌ Hugging Face also failed: {e}")
+            print(f"❌ All Hugging Face models failed: {e}")
 
-    raise Exception("Both Gemini and Hugging Face grading failed.")
+    raise Exception("Gemini and all Hugging Face models failed.")
 
+
+# ── Response parser ───────────────────────────────────────────────────────────
 
 def parse_ai_response(raw_text: str, max_score: int) -> dict:
     clean = raw_text.strip().replace("```json", "").replace("```", "").strip()
@@ -565,7 +643,7 @@ def parse_ai_response(raw_text: str, max_score: int) -> dict:
                 feedback = fb.group(1)[:500].strip().rstrip('"}')
         return {
             "score":       int(score_match.group(1)),
-            "feedback":    feedback or "Graded.",
+            "feedback":    feedback or "Graded successfully.",
             "ai_detected": ai_match.group(1) == "true" if ai_match else False,
             "off_topic":   topic_match.group(1) == "true" if topic_match else False,
         }
@@ -573,12 +651,7 @@ def parse_ai_response(raw_text: str, max_score: int) -> dict:
     raise ValueError(f"Could not parse AI response: {clean[:200]}")
 
 
-def fmt_date(dt):
-    if not dt: return None
-    if isinstance(dt, str): return dt
-    if hasattr(dt, 'year') and dt.year < 2000: return None
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
-
+# ── Grading prompt ────────────────────────────────────────────────────────────
 
 def build_grading_prompt(assignment, essay_text: str, word_count: int) -> str:
     rubric = json.loads(assignment.rubric) if assignment.rubric else {
@@ -590,12 +663,10 @@ def build_grading_prompt(assignment, essay_text: str, word_count: int) -> str:
     )
     reference_block = ""
     if assignment.reference_material and assignment.reference_material.strip():
-        reference_block = f"""
-REFERENCE MATERIAL (provided by teacher — use to verify accuracy):
----
-{assignment.reference_material[:2500]}
----
-"""
+        reference_block = (
+            f"\nREFERENCE MATERIAL (provided by teacher — use to verify accuracy):\n"
+            f"---\n{assignment.reference_material[:2500]}\n---\n"
+        )
     max_score = assignment.max_score
 
     return f"""You are a strict academic essay grader. Grade the student essay ONLY based on how well it answers the assignment question below.
@@ -618,9 +689,8 @@ MANDATORY RULES — FOLLOW EXACTLY
 
 RULE 1 — CHECK TOPIC FIRST (most important rule):
 Before scoring anything, ask: Does this essay actually answer the assignment question?
-- If the essay is about a COMPLETELY DIFFERENT SUBJECT than what is asked, set off_topic=true and score 0 to {round(max_score * 0.15)}.
+- If the essay is about a COMPLETELY DIFFERENT SUBJECT than what is asked, set off_topic=true and score 0 to {round(max_score * 0.05)}.
 - Example: assignment asks about "Java programming for beginners" but essay is about "climate change" → off_topic=true, score={round(max_score * 0.05)}
-- Example: assignment asks about "Java programming" but essay is a "project documentation report" → off_topic=true, score={round(max_score * 0.05)}
 - A beautifully written essay on the WRONG topic still scores near 0. Writing quality cannot save an off-topic essay.
 
 RULE 2 — LENGTH CHECK:
@@ -635,13 +705,13 @@ RULE 3 — SCORING SCALE (only applies if essay is ON-TOPIC):
 - 20-39%: Very poor — mostly irrelevant content
 - 0-15%: Completely off-topic or wrong subject entirely
 
-RULE 4 — AI DETECTION (be very conservative, not strict):
+RULE 4 — AI DETECTION (be very conservative):
 - Default: ai_detected=false
 - Only set ai_detected=true if ALL three are true:
   (a) zero personal voice or student perspective
-  (b) robotic, perfectly structured paragraphs
-  (c) contains 5 or more of these exact phrases: "it is important to note", "plays a crucial role", "in today's society", "it is worth noting", "delve into", "in conclusion it is", "furthermore it is"
-- Being off-topic is NOT the same as being AI-generated. Do not confuse them.
+  (b) robotic, perfectly structured paragraphs with no errors at all
+  (c) contains 5 or more of these exact phrases: "it is important to note", "plays a crucial role",
+      "in today's society", "it is worth noting", "delve into", "in conclusion it is", "furthermore it is"
 
 ════════════════════════════════════════
 STUDENT ESSAY ({word_count} words)
@@ -659,7 +729,16 @@ Reply ONLY with this exact JSON, nothing else:
 {{"score": <integer 0-{max_score}>, "feedback": "specific feedback explaining what the essay got right, what was wrong, and why this score was given", "off_topic": <true or false>, "ai_detected": <true or false>}}"""
 
 
-# ── GET /api/student/assignments ─────────────────────────────────────────────
+# ── Date formatter ────────────────────────────────────────────────────────────
+
+def fmt_date(dt):
+    if not dt: return None
+    if isinstance(dt, str): return dt
+    if hasattr(dt, 'year') and dt.year < 2000: return None
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ── GET /api/student/assignments ──────────────────────────────────────────────
 
 @router.get("/assignments")
 def get_assignments(ctx: dict = Depends(require_student)):
@@ -808,13 +887,12 @@ def submit_essay(
     db.commit()
     db.refresh(submission)
 
-    prompt = build_grading_prompt(assignment, essay_text, word_count)
-
     ai_score           = None
     ai_feedback        = None
     ai_detection_score = None
 
     try:
+        prompt   = build_grading_prompt(assignment, essay_text, word_count)
         raw_text = grade_with_ai(prompt)
         parsed   = parse_ai_response(raw_text, assignment.max_score)
 
@@ -824,33 +902,32 @@ def submit_essay(
             raw_score   = max(0, min(assignment.max_score, int(parsed["score"])))
 
             if off_topic:
-                # Hard cap: off-topic essays cannot score above 15%
-                cap        = round(assignment.max_score * 0.15)
-                raw_score  = min(raw_score, cap)
-                ai_feedback = (
-                    f"❌ OFF-TOPIC SUBMISSION\n\n"
-                    f"The assignment asked you to write about: '{assignment.title}'\n"
-                    f"Your essay does not address this question.\n\n"
-                    f"Please resubmit with an essay that directly answers the assignment question.\n\n"
-                    f"Grader notes: {str(parsed['feedback']).strip()}"
-                )
+                cap_score          = round(assignment.max_score * 0.05)
+                ai_score           = min(raw_score, cap_score)
                 ai_detection_score = 10
-                print(f"❌ Off-topic — capped at {raw_score}/{assignment.max_score}")
+                ai_feedback        = (
+                    f"❌ OFF-TOPIC SUBMISSION\n\n"
+                    f"The assignment asked you to write about: \"{assignment.title}\"\n"
+                    f"Your essay does not address this topic.\n\n"
+                    f"Please resubmit an essay that directly answers the assignment question.\n\n"
+                    f"Score capped at {ai_score}/{assignment.max_score} for off-topic submission."
+                )
+                print(f"❌ Off-topic — capped at {ai_score}/{assignment.max_score}")
 
             elif ai_detected:
                 ai_detection_score = 75
-                ai_feedback = (
+                ai_score           = raw_score
+                ai_feedback        = (
                     f"⚠️ Possible AI-generated content — flagged for teacher review.\n\n"
                     f"{str(parsed['feedback']).strip()}"
                 )
-                print(f"⚠️ AI flagged — score {raw_score}/{assignment.max_score}")
+                print(f"⚠️ AI content flagged — score {ai_score}/{assignment.max_score}")
 
             else:
                 ai_detection_score = 10
+                ai_score           = raw_score
                 ai_feedback        = str(parsed["feedback"]).strip()
-                print(f"✅ Graded: {raw_score}/{assignment.max_score}")
-
-            ai_score = raw_score
+                print(f"✅ Graded: {ai_score}/{assignment.max_score}")
 
     except Exception as e:
         print(f"❌ Grading failed: {e}")
@@ -867,7 +944,7 @@ def submit_essay(
     return {
         "success": True,
         "message": "Essay submitted. Results available after teacher review.",
-        "submission": {"id": submission.id, "status": new_status}
+        "submission": {"id": submission.id, "status": new_status},
     }
 
 
@@ -907,7 +984,10 @@ def unsubmit_essay(
         raise HTTPException(status_code=404, detail="Submission not found")
 
     if submission.final_score is not None:
-        raise HTTPException(status_code=422, detail="This submission has already been graded and cannot be unsubmitted")
+        raise HTTPException(
+            status_code=422,
+            detail="This submission has already been graded and cannot be unsubmitted",
+        )
 
     assignment = db.query(models.Assignment).filter(
         models.Assignment.id == submission.assignment_id
@@ -918,9 +998,15 @@ def unsubmit_essay(
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
     if now > due:
-        raise HTTPException(status_code=422, detail="The deadline has passed — this submission can no longer be unsubmitted")
+        raise HTTPException(
+            status_code=422,
+            detail="The deadline has passed — this submission can no longer be unsubmitted",
+        )
 
     db.delete(submission)
     db.commit()
 
-    return {"success": True, "message": "Essay unsubmitted successfully. You can now rewrite and resubmit before the deadline."}
+    return {
+        "success": True,
+        "message": "Essay unsubmitted successfully. You can now rewrite and resubmit before the deadline.",
+    }
