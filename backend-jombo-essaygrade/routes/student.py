@@ -16,23 +16,71 @@
 
 # BLANTYRE = ZoneInfo("Africa/Blantyre")
 
-# # ── Ollama AI grading ─────────────────────────────────────────────────────────
-# OLLAMA_URL   = "http://localhost:11434/api/generate"
-# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+# GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# HF_API_KEY     = os.getenv("HF_API_KEY", "")
 
-# def call_ollama(prompt: str) -> str:
+# GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# #HF_URL     = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions"
+# HF_URL = "https://router.huggingface.co/v1/chat/completions"
+
+# def call_gemini(prompt: str) -> str:
 #     resp = http_requests.post(
-#         OLLAMA_URL,
+#         f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+#         headers={"Content-Type": "application/json"},
 #         json={
-#             "model": OLLAMA_MODEL,
-#             "prompt": prompt,
-#             "stream": False,
-#             "options": {"temperature": 0.2}
+#             "contents": [{"parts": [{"text": prompt}]}],
+#             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
 #         },
-#         timeout=300,
+#         timeout=60,
 #     )
 #     resp.raise_for_status()
-#     return resp.json()["response"]
+#     data = resp.json()
+#     return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+# def call_huggingface(prompt: str) -> str:
+#     resp = http_requests.post(
+#         HF_URL,
+#         headers={
+#             "Authorization": f"Bearer {HF_API_KEY}",
+#             "Content-Type": "application/json",
+#         },
+#         json={
+#             # "messages": [{"role": "user", "content": prompt}],
+#             # "max_tokens": 512,
+#             # "temperature": 0.2,
+#             "model": "meta-llama/Llama-3.1-8B-Instruct",
+#             "messages": [{"role": "user", "content": prompt}],
+#             "max_tokens": 512,
+#             "temperature": 0.2,
+#         },
+#         timeout=120,
+#     )
+#     resp.raise_for_status()
+#     data = resp.json()
+#     return data["choices"][0]["message"]["content"]
+
+
+# def grade_with_ai(prompt: str) -> str:
+#     if GEMINI_API_KEY:
+#         try:
+#             print("🤖 Trying Gemini for grading...")
+#             result = call_gemini(prompt)
+#             print("✅ Gemini responded successfully")
+#             return result
+#         except Exception as e:
+#             print(f"⚠️ Gemini failed: {e} — trying Hugging Face backup...")
+
+#     if HF_API_KEY:
+#         try:
+#             print("🤖 Trying Hugging Face backup...")
+#             result = call_huggingface(prompt)
+#             print("✅ Hugging Face responded successfully")
+#             return result
+#         except Exception as e:
+#             print(f"❌ Hugging Face also failed: {e}")
+
+#     raise Exception("Both Gemini and Hugging Face grading failed.")
 
 
 # def fmt_date(dt):
@@ -42,13 +90,10 @@
 #     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-# # ── GET /api/student/assignments ─────────────────────────────────────────────
-
 # @router.get("/assignments")
 # def get_assignments(ctx: dict = Depends(require_student)):
 #     user: models.User = ctx["user"]
 #     db: Session       = ctx["db"]
-
 #     rows = (
 #         db.query(models.Assignment, models.Submission)
 #         .outerjoin(
@@ -60,7 +105,6 @@
 #         .order_by(models.Assignment.due_date.asc())
 #         .all()
 #     )
-
 #     assignments = []
 #     for a, s in rows:
 #         assignments.append({
@@ -85,17 +129,13 @@
 #                 "graded_at":        fmt_date(s.graded_at),
 #             } if s else None,
 #         })
-
 #     return {"success": True, "assignments": assignments}
 
-
-# # ── GET /api/student/results ──────────────────────────────────────────────────
 
 # @router.get("/results")
 # def get_results(ctx: dict = Depends(require_student)):
 #     user: models.User = ctx["user"]
 #     db: Session       = ctx["db"]
-
 #     rows = (
 #         db.query(models.Submission, models.Assignment)
 #         .join(models.Assignment, models.Assignment.id == models.Submission.assignment_id)
@@ -103,7 +143,6 @@
 #         .order_by(models.Submission.submitted_at.desc())
 #         .all()
 #     )
-
 #     results = []
 #     for s, a in rows:
 #         results.append({
@@ -120,11 +159,8 @@
 #             "max_score":        a.max_score,
 #             "due_date":         fmt_date(a.due_date),
 #         })
-
 #     return {"success": True, "results": results}
 
-
-# # ── POST /api/student/submit ──────────────────────────────────────────────────
 
 # class SubmitEssayRequest(BaseModel):
 #     assignment_id: int
@@ -187,16 +223,13 @@
 #     db.commit()
 #     db.refresh(submission)
 
-#     # ── AI GRADING via Ollama ────────────────────────────────────────────────
 #     rubric = json.loads(assignment.rubric) if assignment.rubric else {
 #         "content": 30, "structure": 25, "grammar": 20,
 #         "vocabulary": 15, "argumentation": 10
 #     }
-
 #     rubric_description = "\n".join(
 #         f"- {k.capitalize()}: {v}%" for k, v in rubric.items()
 #     )
-
 #     max_score = assignment.max_score
 
 #     prompt = f"""You are a strict academic essay grader. Grade honestly and critically.
@@ -223,7 +256,7 @@
 
 # Student Essay ({word_count} words):
 # ---
-# {essay_text[:2000]}
+# {essay_text[:3000]}
 # ---
 
 # Respond ONLY with this exact JSON, no markdown, no extra text:
@@ -234,21 +267,15 @@
 #     ai_detection_score = None
 
 #     try:
-#         print(f"🤖 Sending essay to Ollama ({OLLAMA_MODEL}) for grading...")
-#         raw_text = call_ollama(prompt)
+#         raw_text = grade_with_ai(prompt)
 #         clean    = raw_text.strip().replace("```json", "").replace("```", "").strip()
-
-#         # Extract JSON even if there is extra text around it
 #         json_match = re.search(r'\{.*\}', clean, re.DOTALL)
 #         if json_match:
 #             clean = json_match.group()
-
 #         parsed = json.loads(clean)
-
 #         if "score" in parsed and "feedback" in parsed:
 #             ai_detected        = parsed.get("ai_detected", False)
 #             ai_detection_score = 90 if ai_detected else 10
-
 #             if ai_detected:
 #                 ai_score    = 0
 #                 ai_feedback = "⚠️ AI-generated content detected. " + str(parsed["feedback"]).strip()
@@ -256,10 +283,9 @@
 #             else:
 #                 ai_score    = max(0, min(max_score, int(parsed["score"])))
 #                 ai_feedback = str(parsed["feedback"]).strip()
-#                 print(f"✅ Ollama graded: {ai_score}/{max_score}")
-
+#                 print(f"✅ Graded: {ai_score}/{max_score}")
 #     except Exception as e:
-#         print(f"❌ Ollama grading failed: {e}")
+#         print(f"❌ All grading APIs failed: {e}")
 
 #     new_status = "ai_graded" if ai_score is not None else "submitted"
 #     submission.ai_score           = ai_score
@@ -282,8 +308,6 @@
 #         }
 #     }
 
-
-# # ── POST /api/student/unsubmit ────────────────────────────────────────────────
 
 # class UnsubmitRequest(BaseModel):
 #     submission_id: int
@@ -349,7 +373,6 @@
 
 
 
-
 import json
 import os
 import re
@@ -372,8 +395,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 HF_API_KEY     = os.getenv("HF_API_KEY", "")
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-#HF_URL     = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions"
-HF_URL = "https://router.huggingface.co/v1/chat/completions"
+HF_URL     = "https://router.huggingface.co/v1/chat/completions"
+
 
 def call_gemini(prompt: str) -> str:
     resp = http_requests.post(
@@ -381,7 +404,12 @@ def call_gemini(prompt: str) -> str:
         headers={"Content-Type": "application/json"},
         json={
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 1024,
+                "topP": 1.0,
+                "topK": 1,
+            },
         },
         timeout=60,
     )
@@ -398,13 +426,10 @@ def call_huggingface(prompt: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            # "messages": [{"role": "user", "content": prompt}],
-            # "max_tokens": 512,
-            # "temperature": 0.2,
             "model": "meta-llama/Llama-3.1-8B-Instruct",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 512,
-            "temperature": 0.2,
+            "temperature": 0.0,
         },
         timeout=120,
     )
@@ -435,6 +460,45 @@ def grade_with_ai(prompt: str) -> str:
     raise Exception("Both Gemini and Hugging Face grading failed.")
 
 
+def parse_ai_response(raw_text: str, max_score: int) -> dict:
+    """Robustly parse AI response — handles broken JSON from HuggingFace."""
+    clean = raw_text.strip().replace("```json", "").replace("```", "").strip()
+
+    # Try to find JSON block
+    json_match = re.search(r'\{.*\}', clean, re.DOTALL)
+    if json_match:
+        clean = json_match.group()
+
+    # Attempt 1: direct parse
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: extract values manually with regex
+    score_match    = re.search(r'"score"\s*:\s*(\d+)', clean)
+    feedback_match = re.search(r'"feedback"\s*:\s*"(.*?)"(?:\s*,|\s*})', clean, re.DOTALL)
+    ai_match       = re.search(r'"ai_detected"\s*:\s*(true|false)', clean)
+
+    if score_match:
+        feedback = ""
+        if feedback_match:
+            feedback = feedback_match.group(1).replace('\\"', '"').strip()
+        else:
+            # Try broader match
+            fb = re.search(r'"feedback"\s*:\s*"(.+)', clean, re.DOTALL)
+            if fb:
+                feedback = fb.group(1)[:500].strip().rstrip('"}')
+
+        return {
+            "score":       int(score_match.group(1)),
+            "feedback":    feedback or "Graded successfully.",
+            "ai_detected": ai_match.group(1) == "true" if ai_match else False,
+        }
+
+    raise ValueError(f"Could not parse AI response: {clean[:200]}")
+
+
 def fmt_date(dt):
     if not dt: return None
     if isinstance(dt, str): return dt
@@ -442,10 +506,13 @@ def fmt_date(dt):
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ── GET /api/student/assignments ─────────────────────────────────────────────
+
 @router.get("/assignments")
 def get_assignments(ctx: dict = Depends(require_student)):
     user: models.User = ctx["user"]
     db: Session       = ctx["db"]
+
     rows = (
         db.query(models.Assignment, models.Submission)
         .outerjoin(
@@ -457,6 +524,7 @@ def get_assignments(ctx: dict = Depends(require_student)):
         .order_by(models.Assignment.due_date.asc())
         .all()
     )
+
     assignments = []
     for a, s in rows:
         assignments.append({
@@ -473,21 +541,26 @@ def get_assignments(ctx: dict = Depends(require_student)):
                 "assignment_id":    s.assignment_id,
                 "essay_text":       s.essay_text,
                 "status":           s.status,
-                "ai_score":         s.ai_score,
-                "ai_feedback":      s.ai_feedback,
+                # Hide scores until teacher approves
+                "ai_score":         s.ai_score if s.final_score is not None else None,
+                "ai_feedback":      s.ai_feedback if s.final_score is not None else None,
                 "final_score":      s.final_score,
                 "teacher_feedback": s.teacher_feedback,
                 "submitted_at":     fmt_date(s.submitted_at),
                 "graded_at":        fmt_date(s.graded_at),
             } if s else None,
         })
+
     return {"success": True, "assignments": assignments}
 
+
+# ── GET /api/student/results ──────────────────────────────────────────────────
 
 @router.get("/results")
 def get_results(ctx: dict = Depends(require_student)):
     user: models.User = ctx["user"]
     db: Session       = ctx["db"]
+
     rows = (
         db.query(models.Submission, models.Assignment)
         .join(models.Assignment, models.Assignment.id == models.Submission.assignment_id)
@@ -495,24 +568,32 @@ def get_results(ctx: dict = Depends(require_student)):
         .order_by(models.Submission.submitted_at.desc())
         .all()
     )
+
     results = []
     for s, a in rows:
+        teacher_approved = s.final_score is not None
         results.append({
-            "id":               s.id,
-            "essay_text":       s.essay_text,
-            "ai_score":         s.ai_score,
-            "ai_feedback":      s.ai_feedback,
-            "final_score":      s.final_score,
-            "teacher_feedback": s.teacher_feedback,
-            "status":           s.status,
-            "submitted_at":     fmt_date(s.submitted_at),
-            "graded_at":        fmt_date(s.graded_at),
-            "assignment_title": a.title,
-            "max_score":        a.max_score,
-            "due_date":         fmt_date(a.due_date),
+            "id":                 s.id,
+            "essay_text":         s.essay_text,
+            # Only show scores after teacher approves
+            "ai_score":           s.ai_score if teacher_approved else None,
+            "ai_feedback":        s.ai_feedback if teacher_approved else None,
+            "ai_detection_score": s.ai_detection_score,
+            "final_score":        s.final_score,
+            "teacher_feedback":   s.teacher_feedback,
+            "status":             s.status,
+            "submitted_at":       fmt_date(s.submitted_at),
+            "graded_at":          fmt_date(s.graded_at),
+            "assignment_title":   a.title,
+            "max_score":          a.max_score,
+            "due_date":           fmt_date(a.due_date),
+            "assignment_id":      s.assignment_id,
         })
+
     return {"success": True, "results": results}
 
+
+# ── POST /api/student/submit ──────────────────────────────────────────────────
 
 class SubmitEssayRequest(BaseModel):
     assignment_id: int
@@ -575,44 +656,48 @@ def submit_essay(
     db.commit()
     db.refresh(submission)
 
+    # ── Build rubric ──────────────────────────────────────────────────────────
     rubric = json.loads(assignment.rubric) if assignment.rubric else {
         "content": 30, "structure": 25, "grammar": 20,
         "vocabulary": 15, "argumentation": 10
     }
-    rubric_description = "\n".join(
-        f"- {k.capitalize()}: {v}%" for k, v in rubric.items()
-    )
-    max_score = assignment.max_score
 
-    prompt = f"""You are a strict academic essay grader. Grade honestly and critically.
+    rubric_lines = []
+    for criterion, weight in rubric.items():
+        rubric_lines.append(f"- {criterion.capitalize()} ({weight}pts): score out of {weight}")
+    rubric_description = "\n".join(rubric_lines)
+
+    max_score      = assignment.max_score
+    reference_text = ""
+    if assignment.reference_material and assignment.reference_material.strip():
+        reference_text = f"\nREFERENCE MATERIAL:\n---\n{assignment.reference_material[:2000]}\n---\n"
+
+    prompt = f"""You are a strict academic essay grader. Be CONSISTENT and DETERMINISTIC.
 
 Assignment: {assignment.title}
 Instructions: {assignment.instructions}
 Maximum Score: {max_score} points
-
-Grading Rubric:
+{reference_text}
+RUBRIC (score each separately then sum):
 {rubric_description}
 
-STRICT GRADING RULES:
-- Score above 80 requires excellent structure, specific examples, and deep analysis
-- Score 60-79 means good effort but missing depth or specific examples
-- Score below 60 means poor structure, vague content, or off-topic
-- If essay is under 100 words, score must be below 40
-- If essay lacks specific examples or evidence, deduct at least 20 points
-- If essay is generic with no real analysis, score must be below 50
+SCORING SCALE:
+- 90-100% of points: Exceptional — specific examples, deep analysis
+- 75-89%: Good — clear arguments, some examples
+- 60-74%: Satisfactory — basic coverage, limited examples
+- 40-59%: Weak — vague, few examples
+- 0-39%: Poor — off-topic, no structure
 
-AI DETECTION RULES:
-- Check if essay sounds AI-written: overly formal, no personal voice, perfect grammar, generic phrases
-- Phrases like "in conclusion", "it is important to note", "plays a crucial role" suggest AI writing
-- If you suspect AI writing, set ai_detected to true
+AI DETECTION:
+- Set ai_detected=true if essay has 3+ of: generic phrases, no personal voice, uniform sentence length, phrases like "plays a crucial role" or "it is important to note"
 
-Student Essay ({word_count} words):
+Essay ({word_count} words):
 ---
-{essay_text[:3000]}
+{essay_text[:2000]}
 ---
 
-Respond ONLY with this exact JSON, no markdown, no extra text:
-{{"score": <integer 0-{max_score}>, "feedback": "<specific detailed feedback>", "ai_detected": <true or false>}}"""
+Reply with ONLY valid JSON. Use single quotes inside feedback text, never double quotes:
+{{"score": <integer 0-{max_score}>, "feedback": "your feedback here using single quotes only", "ai_detected": <true or false>}}"""
 
     ai_score           = None
     ai_feedback        = None
@@ -620,14 +705,12 @@ Respond ONLY with this exact JSON, no markdown, no extra text:
 
     try:
         raw_text = grade_with_ai(prompt)
-        clean    = raw_text.strip().replace("```json", "").replace("```", "").strip()
-        json_match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if json_match:
-            clean = json_match.group()
-        parsed = json.loads(clean)
+        parsed   = parse_ai_response(raw_text, max_score)
+
         if "score" in parsed and "feedback" in parsed:
             ai_detected        = parsed.get("ai_detected", False)
             ai_detection_score = 90 if ai_detected else 10
+
             if ai_detected:
                 ai_score    = 0
                 ai_feedback = "⚠️ AI-generated content detected. " + str(parsed["feedback"]).strip()
@@ -636,6 +719,7 @@ Respond ONLY with this exact JSON, no markdown, no extra text:
                 ai_score    = max(0, min(max_score, int(parsed["score"])))
                 ai_feedback = str(parsed["feedback"]).strip()
                 print(f"✅ Graded: {ai_score}/{max_score}")
+
     except Exception as e:
         print(f"❌ All grading APIs failed: {e}")
 
@@ -650,16 +734,15 @@ Respond ONLY with this exact JSON, no markdown, no extra text:
 
     return {
         "success": True,
-        "message": "Essay submitted and graded successfully",
+        "message": "Essay submitted. Results available after teacher review.",
         "submission": {
-            "id":                 submission.id,
-            "ai_score":           ai_score,
-            "ai_feedback":        ai_feedback,
-            "ai_detection_score": ai_detection_score,
-            "status":             new_status,
+            "id":     submission.id,
+            "status": new_status,
         }
     }
 
+
+# ── POST /api/student/unsubmit ────────────────────────────────────────────────
 
 class UnsubmitRequest(BaseModel):
     submission_id: int
