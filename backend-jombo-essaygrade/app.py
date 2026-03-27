@@ -1,30 +1,36 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask
+from flask_cors import CORS
 from dotenv import load_dotenv
+import os
 
+from routes.auth import auth_bp
+from routes.submissions import submissions_bp
+from routes.students import students_bp
+
+# Load environment variables from .env
 load_dotenv()
 
-from routes import auth, teacher, student
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key')
 
-app = FastAPI(title="JomboEssayGrade API")
+# Allow requests from React frontend
+CORS(app, origins=["http://localhost:5173"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["Content-Type", "X-CSRF-Token"],
-)
+# Register route blueprints
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(submissions_bp, url_prefix='/api/submissions')
+app.register_blueprint(students_bp, url_prefix='/api/students')
 
-app.include_router(auth.router,    prefix="/api/auth",    tags=["Auth"])
-app.include_router(teacher.router, prefix="/api/teacher", tags=["Teacher"])
-app.include_router(student.router, prefix="/api/student", tags=["Student"])
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+```
 
-@app.get("/")
-def root():
-    return {"message": "JomboEssayGrade API is running ✅"}
+---
+
+**Then add this to your `.env` file:**
+```
+SECRET_KEY=your-secret-key-here
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=yourpassword
+DB_NAME=essaygrade
