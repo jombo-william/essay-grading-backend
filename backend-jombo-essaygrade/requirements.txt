@@ -10,3 +10,4 @@ python-jose==3.5.0
 python-multipart==0.0.22
 requests==2.32.5
 cryptography==46.0.5
+flask-socketio==6.5.3

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
+import bcrypt
 from jose import jwt
 from datetime import datetime, timedelta
 import os
@@ -11,7 +11,6 @@ from database import get_db
 from models.user import User
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 JWT_SECRET  = os.getenv("JWT_SECRET", "secret")
 JWT_EXPIRE  = int(os.getenv("JWT_EXPIRE_MINUTES", 60))
@@ -44,7 +43,7 @@ def register(body: RegisterSchema, db: Session = Depends(get_db)):
     if body.role not in ["student", "teacher"]:
         raise HTTPException(status_code=400, detail="Role must be student or teacher")
 
-    hashed = pwd_context.hash(body.password)
+    hashed = bcrypt.hashpw(body.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
     user = User(
         name                = body.name,
@@ -67,7 +66,7 @@ def login(body: LoginSchema, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    if not pwd_context.verify(body.password, user.password):
+    if not bcrypt.checkpw(body.password.encode("utf-8"), user.password.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     token = create_token({
@@ -78,9 +77,17 @@ def login(body: LoginSchema, db: Session = Depends(get_db)):
     })
 
     return {
-        "token":               token,
-        "role":                user.role,
-        "full_name":           user.name,
-        "email":               user.email,
+        "token": token,
+        "csrf_token": token,
+        "session_token": token,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "registration_number": user.registration_number,
+        },
+        "role": user.role,
+        "full_name": user.name,
         "registration_number": user.registration_number,
     }

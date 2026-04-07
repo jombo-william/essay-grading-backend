@@ -96,6 +96,7 @@ class Submission(Base):
     assignment   = relationship("Assignment", back_populates="submissions")
     student      = relationship("User", back_populates="submissions")
     ai_detection = relationship("AIDetectionLog", back_populates="submission", uselist=False)
+    messages     = relationship("SubmissionMessage", back_populates="submission", cascade="all, delete-orphan")
 
 
 class AIDetectionLog(Base):
