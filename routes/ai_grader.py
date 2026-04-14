@@ -155,7 +155,7 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
     scores           = st_util.cos_sim(essay_embedding, ref_embeddings)[0]
     raw_similarity   = float(scores.max().item())
 
-    low, high = 0.60, 0.85
+    low, high = 0.30, 0.70
     scaled    = max(0.0, min(1.0, (raw_similarity - low) / (high - low)))
 
     max_score      = assignment.max_score or 100
@@ -167,7 +167,7 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
 
     base_score     = scaled * max_score * wc_factor
     off_topic      = confidence_pct < 30
-    low_confidence = confidence_pct < 55
+    low_confidence = confidence_pct < 35
 
     if off_topic:
         final_score = min(base_score, max_score * 0.05)
