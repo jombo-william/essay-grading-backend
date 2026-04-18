@@ -152,6 +152,36 @@ def submit_essay(
         submission.ai_graded_at = datetime.now(timezone.utc)
     db.commit()
 
+# ── Push submission to Google Classroom if assignment is linked ───────────
+    try:
+        if assignment.gc_coursework_id and assignment.class_id:
+            from routes.google_classroom import get_gc_course_id_for_class
+            from routes.student_classroom import get_student_credentials
+            from googleapiclient.discovery import build
+
+            gc_course_id = get_gc_course_id_for_class(assignment.class_id, db)
+            if gc_course_id:
+                student_creds = get_student_credentials(user.id, db)
+                classroom_svc = build("classroom", "v1", credentials=student_creds)
+
+                # Mark the student's submission as TURNED_IN
+                student_subs = classroom_svc.courses().courseWork().studentSubmissions().list(
+                    courseId     = gc_course_id,
+                    courseWorkId = assignment.gc_coursework_id,
+                    userId       = "me",
+                ).execute()
+
+                subs = student_subs.get("studentSubmissions", [])
+                if subs:
+                    sub_id = subs[0]["id"]
+                    classroom_svc.courses().courseWork().studentSubmissions().turnIn(
+                        courseId          = gc_course_id,
+                        courseWorkId      = assignment.gc_coursework_id,
+                        id                = sub_id,
+                    ).execute()
+                    print(f"✅ Submission pushed to Google Classroom for student {user.id}")
+    except Exception as e:
+        print(f"⚠️ Could not push to Google Classroom: {e} — local submission still saved")
     return {
         "success": True,
         "message": "Essay submitted. Results available after teacher review.",

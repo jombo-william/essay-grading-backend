@@ -54,6 +54,7 @@ class Class(Base):
     subject     = Column(String(100), nullable=True)
     section     = Column(String(50), nullable=True)
     is_active   = Column(Boolean, default=True, nullable=False)
+    gc_course_id = Column(String(100), nullable=True)
     created_at  = Column(TIMESTAMP, server_default=func.now())
     updated_at  = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
@@ -113,6 +114,7 @@ class Assignment(Base):
     due_date           = Column(DateTime, nullable=False)
     rubric             = Column(Text, nullable=True)  # JSON string
     is_active          = Column(Boolean, default=True)
+    gc_coursework_id   = Column(String(100), nullable=True)
     created_at         = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
@@ -262,3 +264,18 @@ class GoogleClassroomToken(Base):
     updated_at    = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     teacher = relationship("User", foreign_keys=[teacher_id])
+
+class StudentGoogleToken(Base):
+    __tablename__ = "student_google_tokens"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    student_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    access_token  = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=True)
+    token_uri     = Column(String(255), nullable=True)
+    client_id     = Column(String(255), nullable=True)
+    client_secret = Column(String(255), nullable=True)
+    scopes        = Column(Text, nullable=True)
+    gc_user_id    = Column(String(100), nullable=True)
+    created_at    = Column(DateTime, default=func.now())
+    updated_at    = Column(DateTime, default=func.now(), onupdate=func.now())

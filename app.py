@@ -12,6 +12,8 @@ load_dotenv()
 
 from routes import auth, teacher, student, exams, student_exams
 from routes import google_classroom, moodle_integration
+from routes.student_classroom import router as student_classroom_router
+
 
 app = FastAPI(title="JomboEssayGrade API")
 
@@ -39,6 +41,7 @@ app.include_router(exams.router,         prefix="/api/teacher", tags=["Exams"])
 #app.include_router(student_exams.router, prefix="/api/student", tags=["Student Exams"])
 app.include_router(google_classroom.router,   prefix="/api/teacher", tags=["Google Classroom"])
 app.include_router(moodle_integration.router, prefix="/api/teacher", tags=["Moodle"])
+app.include_router(student_classroom_router, prefix="/api/student", tags=["Student Classroom"])
 
 @app.get("/")
 def root():

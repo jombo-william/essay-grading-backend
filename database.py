@@ -25,7 +25,7 @@ def get_db():
         db.close() 
 
 
-
+#local machine ends here 
 
 
 # import os
@@ -38,6 +38,35 @@ def get_db():
 
 # # Reads DATABASE_URL from your .env file
 # DATABASE_URL = os.getenv("DATABASE_URL")
+
+# engine = create_engine(
+#     DATABASE_URL,
+#     pool_pre_ping=True,
+#     pool_size=5,
+#     max_overflow=10
+# )
+
+# SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Base = declarative_base()
+
+# def get_db():
+#     db = SessionLocal()
+#     try:
+#         yield db
+#     finally:
+#         db.close()
+
+
+
+
+# import os
+# from sqlalchemy import create_engine
+# from sqlalchemy.orm import sessionmaker, declarative_base
+# from dotenv import load_dotenv
+
+# load_dotenv()
+
+# DATABASE_URL = os.getenv("DATABASE_URL") or "postgresql://postgres.yyrqliklmlwvkkjhjfge:WJomBo.W%2F%40Tw2111@aws-1-eu-west-1.pooler.supabase.com:6543/postgres"
 
 # engine = create_engine(
 #     DATABASE_URL,

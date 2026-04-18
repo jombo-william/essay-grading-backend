@@ -327,6 +327,19 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
 
+     # ── NEW: also create in Google Classroom if class is linked ──────────────
+    try:
+        from routes.google_classroom import create_gc_assignment
+        gc_id = create_gc_assignment(user.id, body.class_id, assignment, db)
+        if gc_id:
+            assignment.gc_coursework_id = gc_id
+            db.commit()
+            print(f"✅ Assignment also created in Google Classroom: {gc_id}")
+    except Exception as e:
+        print(f"⚠️ Google Classroom sync skipped: {e}")
+
+    return {"success": True, "message": "Assignment created", "id": assignment.id}
+
     return {"success": True, "message": "Assignment created", "id": assignment.id}
 
 
