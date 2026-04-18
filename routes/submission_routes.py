@@ -21,6 +21,7 @@ from auth_utils import require_student, validate_csrf
 from routes.ai_grader import grade_with_ai
 from routes.grading_prompt import build_grading_prompt
 import models
+import googleapiclient.http
 
 router = APIRouter()
 
@@ -152,19 +153,74 @@ def submit_essay(
         submission.ai_graded_at = datetime.now(timezone.utc)
     db.commit()
 
+# # ── Push submission to Google Classroom if assignment is linked ───────────
+#     try:
+#         if assignment.gc_coursework_id and assignment.class_id:
+#             from routes.google_classroom import get_gc_course_id_for_class
+#             from routes.student_classroom import get_student_credentials
+#             from googleapiclient.discovery import build
+
+#             gc_course_id = get_gc_course_id_for_class(assignment.class_id, db)
+#             if gc_course_id:
+#                 student_creds = get_student_credentials(user.id, db)
+#                 classroom_svc = build("classroom", "v1", credentials=student_creds)
+
+#                 # Mark the student's submission as TURNED_IN
+#                 student_subs = classroom_svc.courses().courseWork().studentSubmissions().list(
+#                     courseId     = gc_course_id,
+#                     courseWorkId = assignment.gc_coursework_id,
+#                     userId       = "me",
+#                 ).execute()
+
+#                 subs = student_subs.get("studentSubmissions", [])
+#                 if subs:
+#                     sub_id = subs[0]["id"]
+#                     classroom_svc.courses().courseWork().studentSubmissions().turnIn(
+#                         courseId          = gc_course_id,
+#                         courseWorkId      = assignment.gc_coursework_id,
+#                         id                = sub_id,
+#                     ).execute()
+#                     print(f"✅ Submission pushed to Google Classroom for student {user.id}")
+#     except Exception as e:
+#         print(f"⚠️ Could not push to Google Classroom: {e} — local submission still saved")
+#     return {
+#         "success": True,
+#         "message": "Essay submitted. Results available after teacher review.",
+#         "submission": {"id": submission.id, "status": submission.status},
+#     }
+
 # ── Push submission to Google Classroom if assignment is linked ───────────
     try:
         if assignment.gc_coursework_id and assignment.class_id:
             from routes.google_classroom import get_gc_course_id_for_class
             from routes.student_classroom import get_student_credentials
             from googleapiclient.discovery import build
+            import io
 
             gc_course_id = get_gc_course_id_for_class(assignment.class_id, db)
             if gc_course_id:
                 student_creds = get_student_credentials(user.id, db)
                 classroom_svc = build("classroom", "v1", credentials=student_creds)
+                drive_svc     = build("drive",     "v3", credentials=student_creds)
 
-                # Mark the student's submission as TURNED_IN
+                # Step 1 — Upload essay as a text file to Google Drive
+                file_metadata = {
+                    "name":     f"{user.name} - {assignment.title}.txt",
+                    "mimeType": "text/plain",
+                }
+                media = googleapiclient.http.MediaIoBaseUpload(
+                    io.BytesIO(essay_text.encode("utf-8")),
+                    mimetype="text/plain",
+                    resumable=False,
+                )
+                uploaded = drive_svc.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id",
+                ).execute()
+                file_id = uploaded.get("id")
+
+                # Step 2 — Get the student's submission for this assignment
                 student_subs = classroom_svc.courses().courseWork().studentSubmissions().list(
                     courseId     = gc_course_id,
                     courseWorkId = assignment.gc_coursework_id,
@@ -172,22 +228,32 @@ def submit_essay(
                 ).execute()
 
                 subs = student_subs.get("studentSubmissions", [])
-                if subs:
+                if subs and file_id:
                     sub_id = subs[0]["id"]
-                    classroom_svc.courses().courseWork().studentSubmissions().turnIn(
+
+                    # Step 3 — Attach the uploaded file to the submission
+                    classroom_svc.courses().courseWork().studentSubmissions().modifyAttachments(
                         courseId          = gc_course_id,
                         courseWorkId      = assignment.gc_coursework_id,
                         id                = sub_id,
+                        body={
+                            "addAttachments": [
+                                {"driveFile": {"id": file_id}}
+                            ]
+                        }
                     ).execute()
-                    print(f"✅ Submission pushed to Google Classroom for student {user.id}")
+
+                    # Step 4 — Turn it in
+                    classroom_svc.courses().courseWork().studentSubmissions().turnIn(
+                        courseId     = gc_course_id,
+                        courseWorkId = assignment.gc_coursework_id,
+                        id           = sub_id,
+                    ).execute()
+
+                    print(f"✅ Essay uploaded and submitted to Google Classroom for student {user.id}")
+
     except Exception as e:
         print(f"⚠️ Could not push to Google Classroom: {e} — local submission still saved")
-    return {
-        "success": True,
-        "message": "Essay submitted. Results available after teacher review.",
-        "submission": {"id": submission.id, "status": submission.status},
-    }
-
 
 # ── POST /api/student/unsubmit ────────────────────────────────────────────────
 
@@ -231,6 +297,41 @@ def unsubmit_essay(
         due = due.replace(tzinfo=timezone.utc)
     if now > due:
         raise HTTPException(status_code=422, detail="The deadline has passed — this submission can no longer be unsubmitted")
+
+# ── Unsubmit from Google Classroom if linked ──────────────────────────────
+    try:
+        if assignment.gc_coursework_id and assignment.class_id:
+            from routes.google_classroom import get_gc_course_id_for_class
+            from routes.student_classroom import get_student_credentials
+            from googleapiclient.discovery import build
+
+            gc_course_id = get_gc_course_id_for_class(assignment.class_id, db)
+            if gc_course_id:
+                student_creds = get_student_credentials(user.id, db)
+                classroom_svc = build("classroom", "v1", credentials=student_creds)
+
+                # Get the student's submission
+                student_subs = classroom_svc.courses().courseWork().studentSubmissions().list(
+                    courseId     = gc_course_id,
+                    courseWorkId = assignment.gc_coursework_id,
+                    userId       = "me",
+                ).execute()
+
+                subs = student_subs.get("studentSubmissions", [])
+                if subs:
+                    sub_id = subs[0]["id"]
+
+                    # Recall (unsubmit) in Google Classroom
+                    classroom_svc.courses().courseWork().studentSubmissions().reclaim(
+                        courseId     = gc_course_id,
+                        courseWorkId = assignment.gc_coursework_id,
+                        id           = sub_id,
+                    ).execute()
+
+                    print(f"✅ Unsubmitted from Google Classroom for student {user.id}")
+
+    except Exception as e:
+        print(f"⚠️ Could not unsubmit from Google Classroom: {e} — local unsubmit still proceeding")
 
     db.delete(submission)
     db.commit()
