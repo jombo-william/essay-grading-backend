@@ -37,7 +37,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.students",
     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
-   "https://www.googleapis.com/auth/classroom.grades",
+   #"https://www.googleapis.com/auth/classroom.grades",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 

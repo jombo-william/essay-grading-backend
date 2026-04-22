@@ -19,14 +19,16 @@ app = FastAPI(title="JomboEssayGrade API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-        "https://essaygrade.vercel.app",
-        "https://jombo-essaygrade.vercel.app",
-    ],
+  allow_origins=[
+    "http://localhost:5173",
+    "http://localhost:5174",  # 👈 ADD THIS
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",  # 👈 ADD THIS TOO
+    "http://127.0.0.1:3000",
+    "https://essaygrade.vercel.app",
+    "https://jombo-essaygrade.vercel.app",
+],
     allow_credentials=True,
      allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
    
