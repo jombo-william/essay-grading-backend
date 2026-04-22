@@ -609,3 +609,5 @@ def override_grade(
     print(f"✅ Teacher approved grade: {body.score}/{assignment.max_score} for submission {body.submission_id}")
 
     return {"success": True, "message": "Grade approved and released to student"}
+
+    
