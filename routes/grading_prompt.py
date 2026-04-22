@@ -3,104 +3,146 @@ grading_prompt.py
 =================
 PROMPT + RESPONSE PARSING LIVES HERE.
 
-To change what the AI is told to do  → edit build_grading_prompt()
-To change how scores are extracted   → edit parse_ai_response()
-To change rubric weights             → edit the default rubric dict inside build_grading_prompt()
+- Edit build_grading_prompt() → change AI behavior
+- Edit parse_ai_response()   → change how output is processed
 """
 
 import json
 import re
 
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
-
 def build_grading_prompt(assignment, essay_text: str, word_count: int) -> str:
-    """
-    Build the grading prompt sent to Gemini or HuggingFace.
-    The local model does NOT use this — it uses sentence similarity instead.
-    """
     rubric = json.loads(assignment.rubric) if assignment.rubric else {
-        "content": 30, "structure": 25, "grammar": 20,
-        "vocabulary": 15, "argumentation": 10,
+        "relevance":     30,
+        "content":       25,
+        "structure":     20,
+        "grammar":       15,
+        "vocabulary":    10,
     }
-    rubric_lines = "\n".join(
-        f"  - {k.capitalize()}: {v} points" for k, v in rubric.items()
+
+    max_score           = assignment.max_score
+    total_rubric_points = sum(rubric.values())
+
+    rubric_lines   = []
+    criterion_list = []
+
+    for k, v in rubric.items():
+        actual_max = round((v / total_rubric_points) * max_score)
+        rubric_lines.append(
+            f"  - {k.capitalize()} (max {actual_max} pts): strict evaluation"
+        )
+        criterion_list.append({"name": k.capitalize(), "max": actual_max})
+
+    rubric_block = "\n".join(rubric_lines)
+
+    breakdown_template = ", ".join(
+        f'"{c["name"]}": {{"score": <0-{c["max"]}>, "max": {c["max"]}, "reason": "<one sentence>"}}'
+        for c in criterion_list
     )
 
     reference_block = ""
     if assignment.reference_material and assignment.reference_material.strip():
         reference_block = (
-            f"\nREFERENCE MATERIAL (provided by teacher — use to verify accuracy):\n"
-            f"---\n{assignment.reference_material[:2500]}\n---\n"
+            f"\nREFERENCE / MARKING KEY:\n---\n{assignment.reference_material[:3000]}\n---\n"
         )
 
-    max_score = assignment.max_score
+    return f"""You are a STRICT academic essay grader. You must follow ALL rules exactly. Do NOT be lenient.
 
-    return f"""You are a strict academic essay grader. Grade the student essay ONLY based on how well it answers the assignment question below.
-
-════════════════════════════════════════
+═══════════════════════════════════════
 ASSIGNMENT
-════════════════════════════════════════
-Title: {assignment.title}
-Instructions: {assignment.instructions}
-Maximum score: {max_score} points
+═══════════════════════════════════════
+Title:         {assignment.title}
+Instructions:  {assignment.instructions}
+Maximum score: {max_score}
 {reference_block}
-════════════════════════════════════════
-GRADING RUBRIC
-════════════════════════════════════════
-{rubric_lines}
 
-════════════════════════════════════════
-MANDATORY RULES — FOLLOW EXACTLY
-════════════════════════════════════════
+═══════════════════════════════════════
+RUBRIC (STRICT)
+═══════════════════════════════════════
+{rubric_block}
 
-RULE 1 — CHECK TOPIC FIRST (most important rule):
-Before scoring anything, ask: Does this essay actually answer the assignment question?
-- If the essay is about a COMPLETELY DIFFERENT SUBJECT, set off_topic=true and score 0 to {round(max_score * 0.05)}.
-- A beautifully written essay on the WRONG topic still scores near 0.
+═══════════════════════════════════════
+MANDATORY GRADING PROCESS
+═══════════════════════════════════════
 
-RULE 2 — LENGTH CHECK:
-- Under 100 words on any assignment → max score is {round(max_score * 0.20)}.
+STEP 1 — TOPIC RELEVANCE (STRICT GATE):
 
-RULE 3 — SCORING SCALE (only if essay is ON-TOPIC):
-- 90-100%: Exceptional
-- 75-89%:  Good
-- 60-74%:  Satisfactory
-- 40-59%:  Weak
-- 20-39%:  Very poor
-- 0-15%:   Off-topic / wrong subject
+Compare the essay against BOTH:
+- assignment title
+- assignment instructions
 
-RULE 4 — AI DETECTION (be very conservative):
-- Default: ai_detected=false
-- Only set ai_detected=true if ALL three are true:
-  (a) zero personal voice
-  (b) robotic, perfectly structured paragraphs with no errors
-  (c) 5+ of these exact phrases: "it is important to note", "plays a crucial role",
-      "in today's society", "it is worth noting", "delve into", "in conclusion it is", "furthermore it is"
+Classify as EXACTLY ONE:
+- "directly relevant"
+- "partially relevant"
+- "off-topic"
 
-════════════════════════════════════════
+RULES:
+- "off-topic" → off_topic=true, total_score=0, ALL scores=0, STOP
+- "partially relevant" → total_score MUST NOT exceed {int(max_score * 0.30)}
+- ONLY "directly relevant" can exceed 30%
+
+IMPORTANT:
+- General discussion is NOT enough
+- Essay must clearly answer the question
+- Be strict — do NOT guess intent
+
+═══════════════════════════════════════
+STEP 2 — LENGTH RULES
+═══════════════════════════════════════
+- <50 words  → cap total_score at {round(max_score * 0.10)}
+- <100 words → cap total_score at {round(max_score * 0.25)}
+- <200 words → cap total_score at {round(max_score * 0.50)}
+- 200+ words → no cap
+
+═══════════════════════════════════════
+STEP 3 — CRITERIA GRADING
+═══════════════════════════════════════
+
+SCORING SCALE (STRICT):
+- 100%: precise, directly answers question with strong support
+- 75%: mostly correct, minor gaps
+- 50%: partially correct, noticeable gaps
+- 25%: weak, mostly off-track
+- 0%: irrelevant or incorrect
+
+IMPORTANT:
+- If RELEVANCE score = 0 → TOTAL MUST = 0
+- Be consistent and strict
+
+═══════════════════════════════════════
+STEP 4 — TOTAL SCORE
+═══════════════════════════════════════
+Sum all scores, then apply caps from STEP 1 and STEP 2.
+
+═══════════════════════════════════════
+STEP 5 — AI DETECTION (DEFAULT FALSE)
+═══════════════════════════════════════
+Set ai_detected=true ONLY if ALL:
+- no personal voice
+- perfectly structured
+- contains ≥5 common AI phrases
+
+═══════════════════════════════════════
 STUDENT ESSAY ({word_count} words)
-════════════════════════════════════════
+═══════════════════════════════════════
 {essay_text[:4000]}
-════════════════════════════════════════
+═══════════════════════════════════════
 
-THINK STEP BY STEP:
-Step 1: What topic does the assignment ask about?
-Step 2: What topic is the essay actually about?
-Step 3: Do they match? If not → off_topic=true, score very low
-Step 4: If they match → score using the rubric
+RETURN ONLY VALID JSON:
 
-Reply ONLY with this exact JSON, nothing else:
-{{"score": <integer 0-{max_score}>, "feedback": "specific feedback", "off_topic": <true or false>, "ai_detected": <true or false>}}"""
+{{
+  "relevance_label": "directly relevant" | "partially relevant" | "off-topic",
+  "total_score": <0-{max_score}>,
+  "breakdown": {{{breakdown_template}}},
+  "overall_feedback": "<clear explanation of score and relevance>",
+  "strengths": ["<specific>", "<specific>"],
+  "improvements": ["<specific>", "<specific>"],
+  "off_topic": <true or false>,
+  "ai_detected": <true or false>
+}}"""
 
-
-# ── Response parser ───────────────────────────────────────────────────────────
 
 def parse_ai_response(raw_text: str, max_score: int) -> dict:
-    """
-    Parse the JSON response from Gemini or HuggingFace.
-    Handles messy responses with markdown fences or extra text.
-    """
     clean = raw_text.strip().replace("```json", "").replace("```", "").strip()
 
     json_match = re.search(r'\{.*\}', clean, re.DOTALL)
@@ -108,29 +150,65 @@ def parse_ai_response(raw_text: str, max_score: int) -> dict:
         clean = json_match.group()
 
     try:
-        return json.loads(clean)
+        data = json.loads(clean)
     except json.JSONDecodeError:
-        pass
+        score_match    = re.search(r'"total_score"\s*:\s*(\d+)', clean) or re.search(r'"score"\s*:\s*(\d+)', clean)
+        feedback_match = re.search(r'"overall_feedback"\s*:\s*"(.*?)"(?:\s*,|\s*})', clean, re.DOTALL)
+        ai_match       = re.search(r'"ai_detected"\s*:\s*(true|false)', clean)
+        topic_match    = re.search(r'"off_topic"\s*:\s*(true|false)', clean)
 
-    # Fallback: extract fields with regex
-    score_match    = re.search(r'"score"\s*:\s*(\d+)', clean)
-    feedback_match = re.search(r'"feedback"\s*:\s*"(.*?)"(?:\s*,|\s*})', clean, re.DOTALL)
-    ai_match       = re.search(r'"ai_detected"\s*:\s*(true|false)', clean)
-    topic_match    = re.search(r'"off_topic"\s*:\s*(true|false)', clean)
+        if score_match:
+            return {
+                "score":       int(score_match.group(1)),
+                "feedback":    feedback_match.group(1).strip() if feedback_match else "Graded.",
+                "ai_detected": ai_match.group(1) == "true" if ai_match else False,
+                "off_topic":   topic_match.group(1) == "true" if topic_match else False,
+            }
+        raise ValueError(f"Could not parse AI response: {clean[:200]}")
 
-    if score_match:
-        feedback = ""
-        if feedback_match:
-            feedback = feedback_match.group(1).replace('\\"', '"').strip()
-        else:
-            fb = re.search(r'"feedback"\s*:\s*"(.+)', clean, re.DOTALL)
-            if fb:
-                feedback = fb.group(1)[:500].strip().rstrip('"}')
-        return {
-            "score":       int(score_match.group(1)),
-            "feedback":    feedback or "Graded successfully.",
-            "ai_detected": ai_match.group(1) == "true" if ai_match else False,
-            "off_topic":   topic_match.group(1) == "true" if topic_match else False,
-        }
+    score = max(0, min(max_score, int(data.get("total_score") or data.get("score") or 0)))
 
-    raise ValueError(f"Could not parse AI response: {clean[:200]}")
+    # ✅ HARD ENFORCEMENT (VERY IMPORTANT)
+    if data.get("off_topic") is True:
+        score = 0
+
+    if data.get("relevance_label") == "partially relevant":
+        score = min(score, int(max_score * 0.3))
+
+    overall      = data.get("overall_feedback", "")
+    strengths    = data.get("strengths", [])
+    improvements = data.get("improvements", [])
+    breakdown    = data.get("breakdown", {})
+
+    feedback_parts = []
+
+    if overall:
+        feedback_parts.append(overall)
+
+    if breakdown:
+        feedback_parts.append("\n📊 BREAKDOWN:")
+        for criterion, detail in breakdown.items():
+            if isinstance(detail, dict):
+                s      = detail.get("score", "?")
+                mx     = detail.get("max",   "?")
+                reason = detail.get("reason", "")
+                feedback_parts.append(f"  • {criterion}: {s}/{mx} — {reason}")
+
+    if strengths:
+        feedback_parts.append("\n✅ STRENGTHS:")
+        for s in strengths:
+            feedback_parts.append(f"  • {s}")
+
+    if improvements:
+        feedback_parts.append("\n📈 IMPROVEMENTS:")
+        for imp in improvements:
+            feedback_parts.append(f"  • {imp}")
+
+    return {
+        "score":       score,
+        "feedback":    "\n".join(feedback_parts).strip() or "Graded successfully.",
+        "off_topic":   data.get("off_topic", False),
+        "ai_detected": data.get("ai_detected", False),
+        "breakdown":   breakdown,
+        "graded_by":   "ai_strict_v2",
+    }

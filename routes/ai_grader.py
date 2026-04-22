@@ -18,7 +18,7 @@ from sentence_transformers import SentenceTransformer, util as st_util
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 HF_API_KEY     = os.getenv("HF_API_KEY", "")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 # ── Local model path ──────────────────────────────────────────────────────────
 LOCAL_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "essay-grader-finetuned")
@@ -139,58 +139,29 @@ def get_local_model():
 
 
 def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> dict:
-    model        = get_local_model()
-    title        = (assignment.title or "").strip()
-    instructions = (assignment.instructions or "").strip()
-    ref_material = (assignment.reference_material or "")[:1500].strip()
+    max_score = assignment.max_score or 100
 
-    refs = [
-        f"{title}. {instructions}",
-        f"{title}. {title}. {instructions}",
-        f"{instructions} {ref_material}" if ref_material else instructions,
-    ]
-    anchored_essay   = f"{title}. {essay_text[:2500]}"
-    ref_embeddings   = model.encode(refs, convert_to_tensor=True)
-    essay_embedding  = model.encode([anchored_essay], convert_to_tensor=True)
-    scores           = st_util.cos_sim(essay_embedding, ref_embeddings)[0]
-    raw_similarity   = float(scores.max().item())
-
-    low, high = 0.30, 0.70
-    scaled    = max(0.0, min(1.0, (raw_similarity - low) / (high - low)))
-
-    max_score      = assignment.max_score or 100
-    confidence_pct = raw_similarity * 100
-
-    expected_words = 150
-    wc_ratio  = min(word_count / expected_words, 1.0) if word_count > 0 else 0.5
-    wc_factor = 0.4 + (0.6 * wc_ratio)
-
-    base_score     = scaled * max_score * wc_factor
-    off_topic      = confidence_pct < 30
-    low_confidence = confidence_pct < 35
-
-    if off_topic:
-        final_score = min(base_score, max_score * 0.05)
-    elif low_confidence:
-        final_score = base_score * 0.75
+    # Simple word-count based scoring as last resort
+    if word_count >= 400:
+        score = round(max_score * 0.70)
+        feedback = "Essay submitted successfully. Awaiting teacher review for final grade."
+    elif word_count >= 200:
+        score = round(max_score * 0.55)
+        feedback = "Essay is somewhat short. Consider expanding your arguments. Awaiting teacher review."
+    elif word_count >= 50:
+        score = round(max_score * 0.35)
+        feedback = "Essay is too short. Please expand your response. Awaiting teacher review."
     else:
-        final_score = base_score
-
-    final_score = round(max(0, min(final_score, max_score)))
-
-    print(f"🖥️  Local model → similarity={confidence_pct:.1f}% | score={final_score}/{max_score}")
+        score = 0
+        feedback = "Essay does not meet minimum length requirements."
 
     return {
-        "score":          final_score,
-        "max_score":      max_score,
-        "feedback":       (
-            f"Score: {final_score}/{max_score}. "
-            f"{'Essay appears off-topic.' if off_topic else 'Low confidence — flagged for teacher review.' if low_confidence else 'Graded successfully.'}"
-        ),
+        "score":          score,
+        "feedback":       feedback,
         "ai_detected":    False,
-        "off_topic":      off_topic,
-        "low_confidence": low_confidence,
-        "graded_by":      "local_model",
+        "off_topic":      False,
+        "low_confidence": True,
+        "graded_by":      "basic_fallback",
     }
 
 
@@ -200,10 +171,39 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
 # To switch to full pipeline: replace this function with the commented version below.
 
 def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
+    # ── Step 1: Gemini ────────────────────────────────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            print("🤖 Trying Gemini for grading...")
+            raw    = call_gemini(prompt)
+            parsed = parse_ai_response(raw, assignment.max_score if assignment else 100)
+            parsed.setdefault("low_confidence", False)
+            parsed.setdefault("graded_by", "gemini")
+            print(f"✅ Gemini graded: {parsed.get('score')}")
+            return parsed
+        except http_requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                print("⏳ Gemini rate limit — waiting 15s then retrying...")
+                time.sleep(15)
+                try:
+                    raw    = call_gemini(prompt)
+                    parsed = parse_ai_response(raw, assignment.max_score if assignment else 100)
+                    parsed.setdefault("low_confidence", False)
+                    parsed.setdefault("graded_by", "gemini")
+                    return parsed
+                except Exception as retry_err:
+                    print(f"⚠️ Gemini retry failed: {retry_err} — trying local model...")
+            else:
+                print(f"⚠️ Gemini HTTP error: {e} — trying local model...")
+        except Exception as e:
+            print(f"⚠️ Gemini failed: {e} — trying local model...")
+
+    # ── Step 2: Local model fallback ──────────────────────────────────────────
     if assignment and essay_text:
-        print("🖥️  Using local model...")
+        print("🖥️  Falling back to local model...")
         return grade_with_local_model(assignment, essay_text, word_count)
-    raise Exception("No grading method available.")
+
+    raise Exception("All grading methods exhausted.")
 
 
 # ── Full pipeline (Gemini → HuggingFace → Local) — uncomment to enable ───────
