@@ -5,7 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-load_dotenv()
+#load_dotenv()
+
+load_dotenv(dotenv_path=r"C:\Users\comadmin\Desktop\jombo\essayf-and-backend\backend\backend-jombo-essaygrade\.env")
+
 
 #from routes import auth, teacher, student, exams, student_exams
 #from routes import auth, teacher, student, exams, student_exams, google_classroom, moodle_integration
