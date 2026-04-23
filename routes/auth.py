@@ -43,9 +43,23 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         models.User.email == body.email.strip(),
         models.User.is_active == True,
     ).first()
+    
+    if user:
+        print(f"🔍 Hash in DB: {user.password[:20]}")
+        print(f"🔍 Verify result: {verify_password(body.password, user.password)}")
+
+    # if not user or not verify_password(body.password, user.password):
+    #     raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    print(f"🔍 User found: {user}")
+    if user:
+        print(f"🔍 Full hash: {user.password}")
+        print(f"🔍 Password input: '{body.password}'")
+        print(f"🔍 Verify result: {verify_password(body.password, user.password)}")
 
     if not user or not verify_password(body.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
 
     session_token = generate_token()
     csrf_token    = generate_token()
