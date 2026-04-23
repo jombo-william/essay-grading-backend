@@ -1,6 +1,6 @@
 """
 ai_grader.py
-============
+
 ALL AI GRADING LOGIC LIVES HERE.
 
 To switch AI model         → edit grade_with_ai()
@@ -17,6 +17,8 @@ from sentence_transformers import SentenceTransformer, util as st_util
 # ── API keys (set in your .env) ───────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 HF_API_KEY     = os.getenv("HF_API_KEY", "")
+print(f"🔑 GEMINI_API_KEY loaded: {'YES' if GEMINI_API_KEY else 'NO - KEY IS MISSING'}")
+print(f"🔑 HF_API_KEY loaded: {'YES' if HF_API_KEY else 'NO - KEY IS MISSING'}")
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
@@ -170,41 +172,36 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
 # CURRENT MODE: local model only (Gemini + HuggingFace disabled)
 # To switch to full pipeline: replace this function with the commented version below.
 
-def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
-    # ── Step 1: Gemini ────────────────────────────────────────────────────────
-    if GEMINI_API_KEY:
-        try:
-            print("🤖 Trying Gemini for grading...")
-            raw    = call_gemini(prompt)
-            parsed = parse_ai_response(raw, assignment.max_score if assignment else 100)
-            parsed.setdefault("low_confidence", False)
-            parsed.setdefault("graded_by", "gemini")
-            print(f"✅ Gemini graded: {parsed.get('score')}")
-            return parsed
-        except http_requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429:
-                print("⏳ Gemini rate limit — waiting 15s then retrying...")
-                time.sleep(15)
-                try:
-                    raw    = call_gemini(prompt)
-                    parsed = parse_ai_response(raw, assignment.max_score if assignment else 100)
-                    parsed.setdefault("low_confidence", False)
-                    parsed.setdefault("graded_by", "gemini")
-                    return parsed
-                except Exception as retry_err:
-                    print(f"⚠️ Gemini retry failed: {retry_err} — trying local model...")
-            else:
-                print(f"⚠️ Gemini HTTP error: {e} — trying local model...")
-        except Exception as e:
-            print(f"⚠️ Gemini failed: {e} — trying local model...")
+# the local model starts here 
 
-    # ── Step 2: Local model fallback ──────────────────────────────────────────
+
+# def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
+#     if assignment and essay_text:
+#         print("🖥️  Using local model...")
+#         return grade_with_local_model(assignment, essay_text, word_count)
+#     raise Exception("No grading method available.")
+
+# the local model block ends here  
+
+
+
+
+
+#api keys starts here 
+
+
+def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
     if assignment and essay_text:
-        print("🖥️  Falling back to local model...")
+        print("🖥️  Using local model...")
         return grade_with_local_model(assignment, essay_text, word_count)
 
     raise Exception("All grading methods exhausted.")
 
+
+
+
+
+# api keys ends here 
 
 # ── Full pipeline (Gemini → HuggingFace → Local) — uncomment to enable ───────
 #

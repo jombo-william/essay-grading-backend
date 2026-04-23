@@ -272,7 +272,9 @@ def import_and_grade(
     local_assignment_id: int = Query(...),
     ctx: dict = Depends(require_teacher)
 ):
-    from routes.ai_grader import grade_with_local_model
+    # from routes.ai_grader import grade_with_local_model
+
+    from routes.ai_grader import grade_with_ai
 
     user: models.User = ctx["user"]
     db:   Session     = ctx["db"]
@@ -353,12 +355,23 @@ def import_and_grade(
             continue
 
         try:
+            # word_count = len(essay_text.split())
+            # grade = grade_with_local_model(
+            #     assignment=assignment,
+            #     essay_text=essay_text,
+            #     word_count=word_count,
+            # )
+
             word_count = len(essay_text.split())
-            grade = grade_with_local_model(
+            from routes.grading_prompt import build_grading_prompt
+            prompt = build_grading_prompt(assignment, essay_text, word_count)
+            grade = grade_with_ai(
+                prompt=prompt,
                 assignment=assignment,
                 essay_text=essay_text,
                 word_count=word_count,
             )
+
 
             # ── Find actual student by their gc_user_id ───────────────────
             gc_token = db.query(models.StudentGoogleToken).filter_by(
@@ -473,12 +486,22 @@ def import_and_grade(
             continue
 
         try:
+            # word_count = len(essay_text.split())
+            # grade = grade_with_local_model(
+            #     assignment=assignment,
+            #     essay_text=essay_text,
+            #     word_count=word_count,
+            # )
             word_count = len(essay_text.split())
-            grade = grade_with_local_model(
+            from routes.grading_prompt import build_grading_prompt
+            prompt = build_grading_prompt(assignment, essay_text, word_count)
+            grade = grade_with_ai(
+                prompt=prompt,
                 assignment=assignment,
                 essay_text=essay_text,
                 word_count=word_count,
             )
+
 
             sub.ai_score           = grade["score"]
             sub.ai_feedback        = grade["feedback"]

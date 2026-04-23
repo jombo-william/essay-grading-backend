@@ -249,7 +249,8 @@ def get_assignments(
             "reference_material": a.reference_material,
             "max_score":          a.max_score,
             "due_date":           fmt_date(a.due_date),
-            "rubric":             json.loads(a.rubric) if a.rubric else None,
+            #"rubric":             json.loads(a.rubric) if a.rubric else None,
+            "rubric": (a.rubric if isinstance(a.rubric, dict) else json.loads(a.rubric)) if a.rubric else None,
             "is_active":          a.is_active,
             "created_at":         fmt_date(a.created_at),
             "submission_count":   count,
@@ -609,3 +610,5 @@ def override_grade(
     print(f"✅ Teacher approved grade: {body.score}/{assignment.max_score} for submission {body.submission_id}")
 
     return {"success": True, "message": "Grade approved and released to student"}
+
+    
