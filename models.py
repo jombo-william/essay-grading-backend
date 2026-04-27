@@ -12,7 +12,8 @@ class User(Base):
     name                = Column(String(100), nullable=False)
     email               = Column(String(150), unique=True, nullable=False)
     password            = Column(String(255), nullable=False)
-    role                = Column(Enum("teacher", "student"), nullable=False)
+    #role                = Column(Enum("teacher", "student"), nullable=False)
+    role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
     registration_number = Column(String(50), nullable=True)
     phone               = Column(String(20), nullable=True)
     is_active           = Column(Boolean, default=True)
@@ -158,6 +159,9 @@ class Submission(Base):
     status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
     submitted_at       = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    # In models.py add these two columns to your Assignment model
+    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_course_id     = Column(Integer, nullable=True)
 
     assignment   = relationship("Assignment",    back_populates="submissions")
     student      = relationship("User",          back_populates="submissions")
@@ -279,3 +283,4 @@ class StudentGoogleToken(Base):
     gc_user_id    = Column(String(100), nullable=True)
     created_at    = Column(DateTime, default=func.now())
     updated_at    = Column(DateTime, default=func.now(), onupdate=func.now())
+    
