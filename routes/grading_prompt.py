@@ -30,6 +30,13 @@ def build_grading_prompt(assignment, essay_text: str, word_count: int) -> str:
     "grammar":    15,
     "vocabulary": 10,
     }
+    rubric = assignment.rubric if isinstance(assignment.rubric, dict) else json.loads(assignment.rubric) if assignment.rubric else {
+    "relevance":     30,
+    "content":       25,
+    "structure":     20,
+    "grammar":       15,
+    "vocabulary":    10,
+}
 
     max_score           = assignment.max_score
     total_rubric_points = sum(rubric.values())

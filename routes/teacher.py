@@ -225,7 +225,7 @@ def get_assignments(
         .outerjoin(models.Submission, models.Submission.assignment_id == models.Assignment.id)
         .filter(
             models.Assignment.teacher_id == user.id,
-            models.Assignment.is_active  == True,
+           # models.Assignment.is_active  == True,
         )
     )
 
@@ -450,6 +450,105 @@ def update_assignment(
     db.commit()
 
     return {"success": True, "message": "Assignment updated"}
+
+# ── ADD THESE TWO ENDPOINTS to routes/assignment_routes.py ───────────────────
+# Place them after the /assignments/update endpoint
+
+
+class DeleteAssignmentRequest(BaseModel):
+    id:         int
+    csrf_token: Optional[str] = None
+
+
+@router.post("/assignments/delete")
+def delete_assignment(
+    body: DeleteAssignmentRequest,
+    x_csrf_token: Optional[str] = Header(default=None),
+    ctx: dict = Depends(require_teacher),
+):
+    user: models.User           = ctx["user"]
+    session: models.UserSession = ctx["session"]
+    db: Session                 = ctx["db"]
+
+    validate_csrf(session, x_csrf_token, body.csrf_token)
+
+    assignment = db.query(models.Assignment).filter(
+        models.Assignment.id         == body.id,
+        models.Assignment.teacher_id == user.id,
+    ).first()
+
+    if not assignment:
+        raise HTTPException(status_code=403, detail="Assignment not found or access denied")
+
+    # ── Try to delete from Google Classroom if linked ─────────────────────
+    gc_deleted = False
+    if assignment.gc_coursework_id and assignment.class_id:
+        try:
+            from routes.google_classroom import delete_gc_assignment
+            gc_deleted = delete_gc_assignment(user.id, assignment.class_id, assignment.gc_coursework_id, db)
+        except Exception as e:
+            print(f"⚠️ Could not delete from Google Classroom: {e}")
+
+    # ── Delete from local DB (cascades to submissions, attachments) ───────
+    # db.delete(assignment)
+    # db.commit()
+    # ── Delete submissions and attachments first, then the assignment ─────
+    db.query(models.Submission).filter(
+        models.Submission.assignment_id == assignment.id
+    ).delete(synchronize_session=False)
+
+    db.query(models.AssignmentAttachment).filter(
+        models.AssignmentAttachment.assignment_id == assignment.id
+    ).delete(synchronize_session=False)
+
+    db.delete(assignment)
+    db.commit()
+
+
+    msg = "Assignment deleted."
+    if gc_deleted:
+        msg += " Also removed from Google Classroom."
+
+    print(f"🗑️ Assignment {body.id} deleted by teacher {user.id}")
+    return {"success": True, "message": msg, "gc_deleted": gc_deleted}
+
+
+class ArchiveAssignmentRequest(BaseModel):
+    id:         int
+    csrf_token: Optional[str] = None
+
+
+@router.post("/assignments/archive")
+def archive_assignment(
+    body: ArchiveAssignmentRequest,
+    x_csrf_token: Optional[str] = Header(default=None),
+    ctx: dict = Depends(require_teacher),
+):
+    user: models.User           = ctx["user"]
+    session: models.UserSession = ctx["session"]
+    db: Session                 = ctx["db"]
+
+    validate_csrf(session, x_csrf_token, body.csrf_token)
+
+    assignment = db.query(models.Assignment).filter(
+        models.Assignment.id         == body.id,
+        models.Assignment.teacher_id == user.id,
+    ).first()
+
+    if not assignment:
+        raise HTTPException(status_code=403, detail="Assignment not found or access denied")
+
+    # Toggle archive state (is_active False = archived)
+    assignment.is_active = not assignment.is_active
+    db.commit()
+
+    action = "restored" if assignment.is_active else "archived"
+    print(f"📦 Assignment {body.id} {action} by teacher {user.id}")
+    return {
+        "success":   True,
+        "message":   f"Assignment {action}.",
+        "is_active": assignment.is_active,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

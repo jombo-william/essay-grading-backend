@@ -61,6 +61,7 @@ def get_assignments(ctx: dict = Depends(require_student)):
             "due_date":           fmt_date(a.due_date),
             #"rubric":             json.loads(a.rubric) if a.rubric else None,
             "rubric": (a.rubric if isinstance(a.rubric, dict) else json.loads(a.rubric)) if a.rubric else None,
+            "rubric": a.rubric if isinstance(a.rubric, dict) else json.loads(a.rubric) if a.rubric else None,
             "submitted":          s is not None,
             "submission": {
                 "id":               s.id,

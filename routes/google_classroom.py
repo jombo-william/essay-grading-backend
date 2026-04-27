@@ -116,6 +116,56 @@ def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session
         print(f"⚠️ Could not create Google Classroom assignment: {e}")
         return None
 
+
+    # ── ADD THIS FUNCTION to routes/google_classroom.py ──────────────────────────
+# Place it after the existing create_gc_assignment() function
+
+
+def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, db) -> bool:
+    """
+    Delete a coursework item from Google Classroom.
+    Returns True if successfully deleted, False otherwise.
+    The Classroom API only allows deletion of DRAFT coursework.
+    For PUBLISHED items it sets state to DELETED instead.
+    """
+    gc_course_id = get_gc_course_id_for_class(class_id, db)
+    if not gc_course_id:
+        return False
+
+    try:
+        creds   = get_credentials(teacher_id, db)
+        service = build("classroom", "v1", credentials=creds)
+
+        # First check current state
+        cw = service.courses().courseWork().get(
+            courseId=gc_course_id,
+            id=gc_coursework_id,
+        ).execute()
+
+        if cw.get("state") == "DRAFT":
+            # DRAFT items can be fully deleted
+            service.courses().courseWork().delete(
+                courseId=gc_course_id,
+                id=gc_coursework_id,
+            ).execute()
+            print(f"🗑️ Deleted DRAFT coursework {gc_coursework_id} from Google Classroom")
+        else:
+            # PUBLISHED items: patch state to DELETED
+            service.courses().courseWork().patch(
+                courseId=gc_course_id,
+                id=gc_coursework_id,
+                updateMask="state",
+                body={"state": "DELETED"},
+            ).execute()
+            print(f"🗑️ Set PUBLISHED coursework {gc_coursework_id} to DELETED in Google Classroom")
+
+        return True
+
+    except Exception as e:
+        print(f"⚠️ Could not delete Google Classroom coursework {gc_coursework_id}: {e}")
+        return False
+
+
 # ── GET /api/teacher/auth/google/classroom ────────────────────────────────────
 @router.get("/auth/google/classroom")
 def start_google_auth(ctx: dict = Depends(require_teacher)):
