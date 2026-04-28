@@ -8,6 +8,7 @@ To add/remove HF models    → edit HF_MODELS list
 To tune local model        → edit grade_with_local_model()
 """
 
+#C:\Users\comadmin\Desktop\jombo\essayf-and-backend\backend\routes\ai_grader.py
 import os
 import time
 import requests as http_requests
