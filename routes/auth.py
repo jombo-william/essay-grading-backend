@@ -40,9 +40,8 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail="Invalid email format")
 
     user = db.query(models.User).filter(
-        models.User.email == body.email.strip(),
-        models.User.is_active == True,
-    ).first()
+    models.User.email == body.email.strip(),
+).first()
     
     if user:
         print(f"🔍 Hash in DB: {user.password[:20]}")
