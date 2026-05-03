@@ -1,6 +1,8 @@
 
 
 
+from re import sub
+
 import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -8,6 +10,10 @@ from typing import Optional
 from auth_utils import require_teacher
 import models
 import json
+import asyncio
+import time
+import random
+
 
 router = APIRouter()
 
@@ -150,10 +156,54 @@ async def autograde_moodle(
                 except:
                     rubric = None
 
+            # try:
+            #     grade = grade_essay(essay_text, rubric)
+            await asyncio.sleep(1)  # delay between students to avoid rate limits
+            
+            # last_error = None
+            # grade = None
+            # for attempt in range(3):  # retry up to 3 times
+            #     try:
+            #         grade = grade_essay(essay_text, rubric)
+            #         break
+            #     except Exception as retry_err:
+            #         last_error = retry_err
+            #         if attempt < 2:
+            #             time.sleep(2 ** attempt + random.uniform(0, 1))
+            
+            # if grade is None:
+            #     raise last_error
+            
+            last_error = None
+            grade = None
+            for attempt in range(4):  # 4 attempts
+                try:
+                    grade = grade_essay(essay_text, rubric)
+                    break
+                except Exception as retry_err:
+                    last_error = retry_err
+                    error_str = str(retry_err)
+                    if "429" in error_str:
+                        wait = 15 * (attempt + 1)  # 15s, 30s, 45s, 60s
+                        print(f"Rate limited, waiting {wait}s before retry {attempt+1}...")
+                        time.sleep(wait)
+                    elif "503" in error_str and attempt < 3:
+                        time.sleep(2 ** attempt)
+                    else:
+                        break  # don't retry other errors
+
+            if grade is None:
+                error_msg = str(last_error) if last_error else "Unknown grading error"
+                if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
+                    error_msg = "AI grading service temporarily unavailable (503). Please retry."
+                results.append({
+                    "moodle_user_id": sub["userid"],
+                    "error": error_msg,
+                    "status": "failed"
+                })
+                continue
+
             try:
-                grade = grade_essay(essay_text, rubric)
-
-
                 feedback_text = grade.get("overall_feedback", grade.get("feedback", ""))
                 moodle_call(
                     token    = body.moodle_token,
@@ -172,17 +222,18 @@ async def autograde_moodle(
                     site_url = body.site_url
                 )
 
-
                 results.append({
                     "moodle_user_id": sub["userid"],
                     "score":  grade.get("total_score", grade.get("score", 0)),  # handles both grader.py versions
                     "status": "graded"
                 })
-
             except Exception as e:
+                error_msg = str(e)
+                if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
+                    error_msg = "AI grading service temporarily unavailable (503). Please retry."
                 results.append({
                     "moodle_user_id": sub["userid"],
-                    "error":  str(e),
+                    "error":  error_msg,
                     "status": "failed"
                 })
 
