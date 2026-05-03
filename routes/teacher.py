@@ -710,4 +710,58 @@ def override_grade(
 
     return {"success": True, "message": "Grade approved and released to student"}
 
-    
+    # ── POST /api/teacher/submissions/approve-all ─────────────────────────────────
+
+class ApproveAllRequest(BaseModel):
+    class_id:   Optional[int] = None
+    csrf_token: Optional[str] = None
+
+
+@router.post("/submissions/approve-all")
+def approve_all_grades(
+    body: ApproveAllRequest,
+    x_csrf_token: Optional[str] = Header(default=None),
+    ctx: dict = Depends(require_teacher),
+):
+    user: models.User           = ctx["user"]
+    session: models.UserSession = ctx["session"]
+    db: Session                 = ctx["db"]
+
+    validate_csrf(session, x_csrf_token, body.csrf_token)
+
+    # Find all ai_graded submissions with no final_score and an ai_score
+    q = (
+        db.query(models.Submission)
+        .join(models.Assignment, models.Assignment.id == models.Submission.assignment_id)
+        .filter(
+            models.Assignment.teacher_id  == user.id,
+            models.Submission.status      == "ai_graded",
+            models.Submission.final_score == None,
+            models.Submission.ai_score    != None,   # only approve ones that have an AI score
+        )
+    )
+
+    if body.class_id is not None:
+        q = q.filter(models.Assignment.class_id == body.class_id)
+
+    submissions = q.all()
+
+    if not submissions:
+        return {"success": True, "approved": 0, "message": "No AI-graded submissions to approve."}
+
+    now = datetime.utcnow()
+    for sub in submissions:
+        sub.final_score      = sub.ai_score
+        sub.teacher_feedback = sub.teacher_feedback  # keep existing teacher feedback if any
+        sub.status           = "graded"
+        sub.graded_at        = now
+
+    db.commit()
+
+    print(f"✅ Teacher {user.id} approved {len(submissions)} AI grades (class_id={body.class_id})")
+
+    return {
+        "success":  True,
+        "approved": len(submissions),
+        "message":  f"{len(submissions)} submission(s) approved and released to students.",
+    }

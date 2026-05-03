@@ -33,11 +33,21 @@ except ImportError:
     GOOGLE_AVAILABLE = False
     print("❌ Google packages NOT installed — run: pip install google-auth google-auth-oauthlib google-api-python-client")
 
+# SCOPES = [
+#     "https://www.googleapis.com/auth/classroom.courses.readonly",
+#     "https://www.googleapis.com/auth/classroom.coursework.students",
+#     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
+#    #"https://www.googleapis.com/auth/classroom.grades",
+#     "https://www.googleapis.com/auth/drive.readonly",
+# ]
+
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.students",
+    "https://www.googleapis.com/auth/classroom.coursework.students",      # create/edit assignments
+    "https://www.googleapis.com/auth/classroom.coursework.me",            # student submissions
     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
-   #"https://www.googleapis.com/auth/classroom.grades",
+    "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+    "https://www.googleapis.com/auth/drive.file",                         # upload files to Drive
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
@@ -313,6 +323,119 @@ def get_course_assignments(
         ]
     }
 
+# ── ADD HERE ──────────────────────────────────────────────────────────────────
+@router.get("/classroom/debug-coursework/{course_id}/{cw_id}")
+def debug_coursework(
+    course_id: str,
+    cw_id: str,
+    ctx: dict = Depends(require_teacher)
+):
+    user: models.User = ctx["user"]
+    db:   Session     = ctx["db"]
+
+    creds   = get_credentials(user.id, db)
+    service = build("classroom", "v1", credentials=creds)
+
+    try:
+        result = service.courses().courseWork().get(
+            courseId=course_id,
+            id=cw_id,
+        ).execute()
+        return {"found": True, "data": result}
+    except Exception as e:
+        return {"found": False, "error": str(e)}
+
+
+# ── POST /api/teacher/classroom/courses/{course_id}/sync ─────────────────────
+@router.post("/classroom/courses/{course_id}/sync")
+def sync_gc_assignments(
+    course_id: str,
+    ctx: dict = Depends(require_teacher)
+):
+    user: models.User = ctx["user"]
+    db:   Session     = ctx["db"]
+
+    # Find the local class linked to this gc_course_id
+    cls = db.query(models.Class).filter_by(gc_course_id=course_id).first()
+    if not cls:
+        raise HTTPException(
+            status_code=404,
+            detail="No local class is linked to this Google Classroom course. Please link it first."
+        )
+
+    creds   = get_credentials(user.id, db)
+    service = build("classroom", "v1", credentials=creds)
+
+    # Fetch all coursework from Google Classroom
+    result = service.courses().courseWork().list(
+        courseId=course_id
+    ).execute()
+
+    gc_assignments = result.get("courseWork", [])
+    print(f"📥 Found {len(gc_assignments)} assignments in Google Classroom")
+
+    created = 0
+    skipped = 0
+
+    for gca in gc_assignments:
+        gc_cw_id = gca.get("id")
+
+        # Skip if already in our DB
+        existing = db.query(models.Assignment).filter_by(
+            gc_coursework_id=gc_cw_id
+        ).first()
+        if existing:
+            skipped += 1
+            continue
+
+        # Parse due date
+        due_date = None
+        if "dueDate" in gca and "dueTime" in gca:
+            d = gca["dueDate"]
+            t = gca["dueTime"]
+            try:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                due_date = datetime(
+                    d.get("year",  2025),
+                    d.get("month", 1),
+                    d.get("day",   1),
+                    t.get("hours",   0),
+                    t.get("minutes", 0),
+                    tzinfo=ZoneInfo("Africa/Blantyre")
+                )
+            except Exception:
+                from datetime import datetime, timezone, timedelta
+                due_date = datetime.now(timezone.utc) + timedelta(days=7)
+        else:
+            from datetime import datetime, timezone, timedelta
+            due_date = datetime.now(timezone.utc) + timedelta(days=7)
+
+        # Create assignment in local DB
+        new_assignment = models.Assignment(
+            teacher_id         = user.id,
+            class_id           = cls.id,
+            title              = gca.get("title", "Untitled"),
+            description        = gca.get("description", ""),
+            instructions       = gca.get("description", "Imported from Google Classroom"),
+            reference_material = None,
+            max_score          = int(gca.get("maxPoints", 100)),
+            due_date           = due_date,
+            rubric             = None,
+            gc_coursework_id   = gc_cw_id,
+        )
+        db.add(new_assignment)
+        created += 1
+
+    db.commit()
+
+    print(f"✅ Sync complete: {created} created, {skipped} already existed")
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped,
+        "message": f"{created} assignment(s) imported, {skipped} already existed.",
+    }        
 
 # ── POST /api/teacher/classroom/courses/{course_id}/assignments/{cw_id}/grade ─
 @router.post("/classroom/courses/{course_id}/assignments/{coursework_id}/grade")
