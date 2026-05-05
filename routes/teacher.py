@@ -1,6 +1,3 @@
-
-
-
 import json
 import os
 import re
@@ -62,8 +59,6 @@ def teacher_owns_class(db: Session, teacher_id: int, class_id: int) -> bool:
 #  CLASSES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── GET /api/teacher/classes ──────────────────────────────────────────────────
-
 @router.get("/classes")
 def get_classes(ctx: dict = Depends(require_teacher)):
     user: models.User = ctx["user"]
@@ -75,7 +70,6 @@ def get_classes(ctx: dict = Depends(require_teacher)):
             func.count(func.distinct(models.Assignment.id)).label("total_assignments"),
             func.count(func.distinct(models.ClassEnrollment.student_id)).label("total_students"),
         )
-        # Join through teacher_classes to find classes assigned to this teacher
         .join(models.TeacherClass, models.TeacherClass.class_id == models.Class.id)
         .outerjoin(models.Assignment,      models.Assignment.class_id      == models.Class.id)
         .outerjoin(models.ClassEnrollment, models.ClassEnrollment.class_id == models.Class.id)
@@ -105,8 +99,6 @@ def get_classes(ctx: dict = Depends(require_teacher)):
     return {"success": True, "classes": classes}
 
 
-# ── GET /api/teacher/classes/{class_id}/students ─────────────────────────────
-
 @router.get("/classes/{class_id}/students")
 def get_class_students(class_id: int, ctx: dict = Depends(require_teacher)):
     user: models.User = ctx["user"]
@@ -135,8 +127,6 @@ def get_class_students(class_id: int, ctx: dict = Depends(require_teacher)):
 
     return {"success": True, "students": students}
 
-
-# ── POST /api/teacher/classes/{class_id}/enroll ──────────────────────────────
 
 class EnrollRequest(BaseModel):
     student_ids: List[int]
@@ -172,8 +162,6 @@ def enroll_students(
     return {"success": True, "message": f"{added} student(s) enrolled."}
 
 
-# ── POST /api/teacher/classes/{class_id}/unenroll ────────────────────────────
-
 class UnenrollRequest(BaseModel):
     student_id: int
     csrf_token: Optional[str] = None
@@ -204,10 +192,8 @@ def unenroll_student(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ASSIGNMENTS  (filtered by class_id)
+#  ASSIGNMENTS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ── GET /api/teacher/assignments?class_id=<id> ────────────────────────────────
 
 @router.get("/assignments")
 def get_assignments(
@@ -223,10 +209,7 @@ def get_assignments(
             func.count(models.Submission.id).label("submission_count")
         )
         .outerjoin(models.Submission, models.Submission.assignment_id == models.Assignment.id)
-        .filter(
-            models.Assignment.teacher_id == user.id,
-           # models.Assignment.is_active  == True,
-        )
+        .filter(models.Assignment.teacher_id == user.id)
     )
 
     if class_id is not None:
@@ -249,7 +232,6 @@ def get_assignments(
             "reference_material": a.reference_material,
             "max_score":          a.max_score,
             "due_date":           fmt_date(a.due_date),
-            #"rubric":             json.loads(a.rubric) if a.rubric else None,
             "rubric": (a.rubric if isinstance(a.rubric, dict) else json.loads(a.rubric)) if a.rubric else None,
             "is_active":          a.is_active,
             "created_at":         fmt_date(a.created_at),
@@ -258,8 +240,6 @@ def get_assignments(
 
     return {"success": True, "assignments": assignments}
 
-
-# ── POST /api/teacher/assignments/create ─────────────────────────────────────
 
 class CreateAssignmentRequest(BaseModel):
     class_id:           int
@@ -285,7 +265,6 @@ def create_assignment(
 
     validate_csrf(session, x_csrf_token, body.csrf_token)
 
-    # Verify the teacher is assigned to this class
     if not teacher_owns_class(db, user.id, body.class_id):
         raise HTTPException(status_code=404, detail="Class not found or access denied.")
 
@@ -328,7 +307,7 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
 
-     # ── NEW: also create in Google Classroom if class is linked ──────────────
+    # ── Also create in Google Classroom if class is linked ────────────────────
     try:
         from routes.google_classroom import create_gc_assignment
         gc_id = create_gc_assignment(user.id, body.class_id, assignment, db)
@@ -341,10 +320,6 @@ def create_assignment(
 
     return {"success": True, "message": "Assignment created", "id": assignment.id}
 
-    return {"success": True, "message": "Assignment created", "id": assignment.id}
-
-
-# ── POST /api/teacher/assignments/{assignment_id}/upload-reference ────────────
 
 @router.post("/assignments/{assignment_id}/upload-reference")
 async def upload_reference_material(
@@ -383,8 +358,6 @@ async def upload_reference_material(
         "chars_extracted": len(text),
     }
 
-
-# ── POST /api/teacher/assignments/update ─────────────────────────────────────
 
 class UpdateAssignmentRequest(BaseModel):
     id:                 int
@@ -451,9 +424,6 @@ def update_assignment(
 
     return {"success": True, "message": "Assignment updated"}
 
-# ── ADD THESE TWO ENDPOINTS to routes/assignment_routes.py ───────────────────
-# Place them after the /assignments/update endpoint
-
 
 class DeleteAssignmentRequest(BaseModel):
     id:         int
@@ -480,7 +450,6 @@ def delete_assignment(
     if not assignment:
         raise HTTPException(status_code=403, detail="Assignment not found or access denied")
 
-    # ── Try to delete from Google Classroom if linked ─────────────────────
     gc_deleted = False
     if assignment.gc_coursework_id and assignment.class_id:
         try:
@@ -489,10 +458,6 @@ def delete_assignment(
         except Exception as e:
             print(f"⚠️ Could not delete from Google Classroom: {e}")
 
-    # ── Delete from local DB (cascades to submissions, attachments) ───────
-    # db.delete(assignment)
-    # db.commit()
-    # ── Delete submissions and attachments first, then the assignment ─────
     db.query(models.Submission).filter(
         models.Submission.assignment_id == assignment.id
     ).delete(synchronize_session=False)
@@ -503,7 +468,6 @@ def delete_assignment(
 
     db.delete(assignment)
     db.commit()
-
 
     msg = "Assignment deleted."
     if gc_deleted:
@@ -538,7 +502,6 @@ def archive_assignment(
     if not assignment:
         raise HTTPException(status_code=403, detail="Assignment not found or access denied")
 
-    # Toggle archive state (is_active False = archived)
     assignment.is_active = not assignment.is_active
     db.commit()
 
@@ -552,10 +515,8 @@ def archive_assignment(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SUBMISSIONS  (filtered by class_id)
+#  SUBMISSIONS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ── GET /api/teacher/submissions?class_id=<id> ───────────────────────────────
 
 @router.get("/submissions")
 def get_submissions(
@@ -604,8 +565,6 @@ def get_submissions(
 
     return {"success": True, "submissions": submissions}
 
-
-# ── GET /api/teacher/submissions/pending?class_id=<id> ───────────────────────
 
 @router.get("/submissions/pending")
 def get_pending_grading(
@@ -708,9 +667,41 @@ def override_grade(
 
     print(f"✅ Teacher approved grade: {body.score}/{assignment.max_score} for submission {body.submission_id}")
 
+    # ── Sync final grade back to Moodle if student is connected ──────────────
+    try:
+        moodle_record = db.query(models.StudentMoodleToken).filter(
+            models.StudentMoodleToken.student_id == submission.student_id
+        ).first()
+
+        if moodle_record and assignment.moodle_assignment_id:
+            from routes.student_moodle import moodle_call
+
+            site_info      = moodle_call(moodle_record.site_url, moodle_record.token, "core_webservice_get_site_info", {})
+            moodle_user_id = site_info.get("userid")
+
+            moodle_call(
+                moodle_record.site_url, moodle_record.token,
+                "mod_assign_save_grade",
+                {
+                    "assignmentid":                                      assignment.moodle_assignment_id,
+                    "userid":                                            moodle_user_id,
+                    "grade":                                             float(body.score),
+                    "attemptnumber":                                     -1,
+                    "addattempt":                                        0,
+                    "workflowstate":                                     "released",
+                    "applytoall":                                        1,
+                    "plugindata[assignfeedbackcomments_editor][text]":   submission.teacher_feedback or "",
+                    "plugindata[assignfeedbackcomments_editor][format]": 1,
+                }
+            )
+            print(f"✅ Grade synced to Moodle for student {submission.student_id}")
+    except Exception as e:
+        print(f"⚠️  Moodle grade sync failed (non-blocking): {e}")
+
     return {"success": True, "message": "Grade approved and released to student"}
 
-    # ── POST /api/teacher/submissions/approve-all ─────────────────────────────────
+
+# ── POST /api/teacher/submissions/approve-all ─────────────────────────────────
 
 class ApproveAllRequest(BaseModel):
     class_id:   Optional[int] = None
@@ -729,7 +720,6 @@ def approve_all_grades(
 
     validate_csrf(session, x_csrf_token, body.csrf_token)
 
-    # Find all ai_graded submissions with no final_score and an ai_score
     q = (
         db.query(models.Submission)
         .join(models.Assignment, models.Assignment.id == models.Submission.assignment_id)
@@ -737,7 +727,7 @@ def approve_all_grades(
             models.Assignment.teacher_id  == user.id,
             models.Submission.status      == "ai_graded",
             models.Submission.final_score == None,
-            models.Submission.ai_score    != None,   # only approve ones that have an AI score
+            models.Submission.ai_score    != None,
         )
     )
 
@@ -752,13 +742,54 @@ def approve_all_grades(
     now = datetime.utcnow()
     for sub in submissions:
         sub.final_score      = sub.ai_score
-        sub.teacher_feedback = sub.teacher_feedback  # keep existing teacher feedback if any
+        sub.teacher_feedback = sub.teacher_feedback
         sub.status           = "graded"
         sub.graded_at        = now
 
     db.commit()
 
     print(f"✅ Teacher {user.id} approved {len(submissions)} AI grades (class_id={body.class_id})")
+
+    # ── Sync all approved grades back to Moodle ───────────────────────────────
+    synced_count = 0
+    for sub in submissions:
+        try:
+            moodle_record = db.query(models.StudentMoodleToken).filter(
+                models.StudentMoodleToken.student_id == sub.student_id
+            ).first()
+
+            sub_assignment = db.query(models.Assignment).filter(
+                models.Assignment.id == sub.assignment_id
+            ).first()
+
+            if moodle_record and sub_assignment and sub_assignment.moodle_assignment_id:
+                from routes.student_moodle import moodle_call
+
+                site_info      = moodle_call(moodle_record.site_url, moodle_record.token, "core_webservice_get_site_info", {})
+                moodle_user_id = site_info.get("userid")
+
+                moodle_call(
+                    moodle_record.site_url, moodle_record.token,
+                    "mod_assign_save_grade",
+                    {
+                        "assignmentid":                                      sub_assignment.moodle_assignment_id,
+                        "userid":                                            moodle_user_id,
+                        "grade":                                             float(sub.ai_score),
+                        "attemptnumber":                                     -1,
+                        "addattempt":                                        0,
+                        "workflowstate":                                     "released",
+                        "applytoall":                                        1,
+                        "plugindata[assignfeedbackcomments_editor][text]":   sub.teacher_feedback or "",
+                        "plugindata[assignfeedbackcomments_editor][format]": 1,
+                    }
+                )
+                synced_count += 1
+        except Exception as e:
+            print(f"⚠️  Moodle sync failed for submission {sub.id}: {e}")
+            continue
+
+    if synced_count:
+        print(f"✅ Synced {synced_count} grades to Moodle")
 
     return {
         "success":  True,

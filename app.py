@@ -4,6 +4,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+# app.py — add after the existing imports at the top
+from routes.student_moodle import router as student_moodle_router
 
 #load_dotenv()
 
@@ -49,6 +51,7 @@ app.include_router(google_classroom.router,   prefix="/api/teacher", tags=["Goog
 app.include_router(moodle_integration.router, prefix="/api/teacher", tags=["Moodle"])
 app.include_router(student_classroom_router, prefix="/api/student", tags=["Student Classroom"])
 app.include_router(grading.router, prefix="/api", tags=["Grading"])
+app.include_router(student_moodle_router, prefix="/api/student", tags=["Student Moodle"])
 
 @app.get("/")
 def root():
