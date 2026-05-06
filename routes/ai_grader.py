@@ -314,24 +314,24 @@ def call_huggingface(prompt: str) -> str:
 
 
 def _similarity_fallback(assignment, essay_text: str) -> dict:
-    """Use the new similarity grader from services/grader.py."""
+    """Use the similarity grader from services/grader.py — always returns real scores."""
     from services.grader import grade_essay
     rubric = None
     if hasattr(assignment, "rubric") and assignment.rubric:
-        rubric = assignment.rubric
+        rubric = assignment.rubric if isinstance(assignment.rubric, dict) else None
 
-    result = grade_essay(essay_text, rubric=rubric)
-
+    result    = grade_essay(essay_text, rubric=rubric)
     max_score = getattr(assignment, "max_score", None) or 100
     raw_score = result.get("total_score", 50)
-    # Scale from 0-100 to 0-max_score
+
+    # Scale 0-100 → 0-max_score
     scaled = round(raw_score / 100 * max_score)
 
     return {
         "score":          scaled,
         "feedback":       result.get("overall_feedback", "Graded automatically."),
         "ai_detected":    False,
-        "off_topic":      result.get("graded_by", "").startswith("similarity") and "off_topic" in result.get("graded_by", ""),
+        "off_topic":      "off_topic" in result.get("graded_by", ""),
         "low_confidence": "low" in result.get("graded_by", ""),
         "graded_by":      result.get("graded_by", "similarity-model"),
     }
@@ -339,11 +339,12 @@ def _similarity_fallback(assignment, essay_text: str) -> dict:
 
 def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
     """
-    Main grading dispatcher — called by submission_routes.py and Google Classroom routes.
+    Main grading dispatcher.
     Fallback chain:
       1. Gemini 2.5-flash
-      2. HuggingFace (Llama / Qwen)
-      3. Similarity model (training_data.csv) — always works, no API needed
+      2. HuggingFace (only accepted if score > 0)
+      3. Similarity model (training_data.csv) — always gives real scores
+      4. Word-count estimate (absolute last resort)
     """
     from routes.grading_prompt import build_grading_prompt, parse_ai_response
     max_score = getattr(assignment, "max_score", None) or 100
@@ -357,8 +358,10 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             parsed = parse_ai_response(raw, max_score)
             parsed.setdefault("low_confidence", False)
             parsed.setdefault("graded_by", "gemini")
-            print("✅ Gemini graded successfully")
-            return parsed
+            if parsed.get("score", 0) > 0 or parsed.get("off_topic"):
+                print(f"✅ Gemini graded — score: {parsed.get('score')}")
+                return parsed
+            print("⚠️ Gemini returned score=0 — trying fallback...")
         except http_requests.exceptions.HTTPError as e:
             if e.response and e.response.status_code == 429:
                 print("⏳ Gemini rate limited — retrying in 12s...")
@@ -369,7 +372,8 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
                     parsed = parse_ai_response(raw, max_score)
                     parsed.setdefault("low_confidence", False)
                     parsed.setdefault("graded_by", "gemini")
-                    return parsed
+                    if parsed.get("score", 0) > 0 or parsed.get("off_topic"):
+                        return parsed
                 except Exception as retry_err:
                     print(f"⚠️ Gemini retry failed: {retry_err}")
             else:
@@ -377,7 +381,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         except Exception as e:
             print(f"⚠️ Gemini failed: {e}")
 
-    # ── 2. HuggingFace ─────────────────────────────────────────────────────────
+    # ── 2. HuggingFace — reject score=0 ───────────────────────────────────────
     if HF_API_KEY and assignment and essay_text:
         try:
             print("🤖 Trying HuggingFace...")
@@ -386,33 +390,37 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             parsed = parse_ai_response(raw, max_score)
             parsed.setdefault("low_confidence", False)
             parsed.setdefault("graded_by", "huggingface")
-            return parsed
+            if parsed.get("score", 0) > 0 or parsed.get("off_topic"):
+                print(f"✅ HuggingFace graded — score: {parsed.get('score')}")
+                return parsed
+            else:
+                print("⚠️ HuggingFace returned score=0 — not trustworthy, falling through...")
         except Exception as e:
             print(f"⚠️ HuggingFace failed: {e}")
 
-    # ── 3. Similarity model (always works) ─────────────────────────────────────
+    # ── 3. Similarity model ────────────────────────────────────────────────────
     if assignment and essay_text:
-        print("🤖 Trying similarity model (training_data.csv)...")
+        print("🤖 Using similarity model (training_data.csv)...")
         try:
             result = _similarity_fallback(assignment, essay_text)
-            print(f"✅ Similarity model graded — score: {result['score']}")
+            print(f"✅ Similarity model graded — score: {result['score']}/{max_score}")
             return result
         except Exception as e:
             print(f"⚠️ Similarity model failed: {e}")
 
-    # ── 4. Basic word-count fallback (absolute last resort) ────────────────────
+    # ── 4. Word-count estimate (absolute last resort) ──────────────────────────
     print("🖥️  Falling back to word-count estimate...")
     if word_count >= 400:
-        score = round(max_score * 0.70)
+        score    = round(max_score * 0.70)
         feedback = "Essay submitted. Awaiting teacher review for final grade."
     elif word_count >= 200:
-        score = round(max_score * 0.55)
+        score    = round(max_score * 0.55)
         feedback = "Essay is somewhat short. Consider expanding your arguments."
     elif word_count >= 50:
-        score = round(max_score * 0.35)
+        score    = round(max_score * 0.35)
         feedback = "Essay is too short. Please expand your response."
     else:
-        score = 0
+        score    = 5
         feedback = "Essay does not meet minimum length requirements."
 
     return {
