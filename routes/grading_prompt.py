@@ -1,6 +1,6 @@
 """
 grading_prompt.py
-=================
+
 PROMPT + RESPONSE PARSING LIVES HERE.
 
 - Edit build_grading_prompt() → change AI behavior
