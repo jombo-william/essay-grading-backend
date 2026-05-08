@@ -330,6 +330,40 @@ def submit_essay(
 
     except Exception as e:
         print(f"⚠️ Could not push to Google Classroom: {e} — local submission still saved")
+        # ── Push to Moodle if assignment is linked and student has token ───────────
+    try:
+        if assignment.moodle_assignment_id and assignment.moodle_course_id:
+            from routes.student_moodle import moodle_call
+
+            moodle_record = db.query(models.StudentMoodleToken).filter(
+                models.StudentMoodleToken.student_id == user.id
+            ).first()
+
+            if moodle_record:
+                site_url = moodle_record.site_url
+                token    = moodle_record.token
+
+                # Push essay text to Moodle
+                moodle_call(
+                    site_url, token,
+                    "mod_assign_save_submission",
+                    {
+                        "assignmentid": assignment.moodle_assignment_id,
+                        "plugindata[onlinetext_editor][text]":   essay_text,
+                        "plugindata[onlinetext_editor][format]": 1,
+                        "plugindata[onlinetext_editor][itemid]": 0,
+                    }
+                )
+
+                # Save Moodle IDs on submission record
+                submission.moodle_assignment_id = assignment.moodle_assignment_id
+                submission.moodle_course_id     = assignment.moodle_course_id
+                db.commit()
+
+                print(f"✅ Essay pushed to Moodle for student {user.id}")
+
+    except Exception as e:
+        print(f"⚠️ Could not push to Moodle: {e} — local submission still saved")
 
     return {
         "success":    True,

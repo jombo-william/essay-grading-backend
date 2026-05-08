@@ -116,6 +116,9 @@ class Assignment(Base):
     rubric             = Column(Text, nullable=True)  # JSON string
     is_active          = Column(Boolean, default=True)
     gc_coursework_id   = Column(String(100), nullable=True)
+    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_course_id     = Column(Integer, nullable=True)
+    moodle_site_url      = Column(String(255), nullable=True)
     created_at         = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
@@ -283,4 +286,16 @@ class StudentGoogleToken(Base):
     gc_user_id    = Column(String(100), nullable=True)
     created_at    = Column(DateTime, default=func.now())
     updated_at    = Column(DateTime, default=func.now(), onupdate=func.now())
-    
+
+
+class StudentMoodleToken(Base):
+    __tablename__ = "student_moodle_tokens"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    token      = Column(Text, nullable=False)
+    site_url   = Column(String(255), nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    student = relationship("User", foreign_keys=[student_id])

@@ -16,8 +16,10 @@ File map:
 from fastapi import APIRouter
 from routes.submission_routes import router as submission_router
 from routes.assignment_routes import router as assignment_router
+from routes.student_moodle import router as student_moodle_router
 
 router = APIRouter()
 
+router.include_router(student_moodle_router)
 router.include_router(assignment_router)
 router.include_router(submission_router)
