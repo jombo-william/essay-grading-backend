@@ -206,52 +206,7 @@ def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session
 
 
     # ── ADD THIS FUNCTION to routes/google_classroom.py ──────────────────────────
-# Place it after the existing create_gc_assignment() function
 
-
-# def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, db) -> bool:
-#     """
-#     Delete a coursework item from Google Classroom.
-#     Returns True if successfully deleted, False otherwise.
-#     The Classroom API only allows deletion of DRAFT coursework.
-#     For PUBLISHED items it sets state to DELETED instead.
-#     """
-#     gc_course_id = get_gc_course_id_for_class(class_id, db)
-#     if not gc_course_id:
-#         return False
-
-#     try:
-#         creds   = get_credentials(teacher_id, db)
-#         service = build("classroom", "v1", credentials=creds)
-
-#         # First check current state
-#         cw = service.courses().courseWork().get(
-#             courseId=gc_course_id,
-#             id=gc_coursework_id,
-#         ).execute()
-
-#         if cw.get("state") == "DRAFT":
-#             # DRAFT items can be fully deleted
-#             service.courses().courseWork().delete(
-#                 courseId=gc_course_id,
-#                 id=gc_coursework_id,
-#             ).execute()
-#             print(f"🗑️ Deleted DRAFT coursework {gc_coursework_id} from Google Classroom")
-#         else:
-#             # PUBLISHED items: patch state to DELETED
-#             service.courses().courseWork().patch(
-#                 courseId=gc_course_id,
-#                 id=gc_coursework_id,
-#                 updateMask="state",
-#                 body={"state": "DELETED"},
-#             ).execute()
-#             print(f"🗑️ Set PUBLISHED coursework {gc_coursework_id} to DELETED in Google Classroom")
-
-#         return True
-
-#     except Exception as e:
-#         print(f"⚠️ Could not delete Google Classroom coursework {gc_coursework_id}: {e}")
-#         return False
 
 
 
@@ -684,10 +639,7 @@ def import_and_grade(
     gc_user_ids = set()
 
     # ── Grade Google Classroom submissions ────────────────────────────────────
-    # for gs in student_subs:
-    #     gc_uid = gs.get("userId", "unknown")
-    #     gc_user_ids.add(gc_uid)
-    #     essay_text  = ""
+   
 
     for gs in student_subs:
         gc_uid = gs.get("userId", "unknown")
@@ -718,16 +670,7 @@ def import_and_grade(
                             fileId=file_id, mimeType="text/plain"
                         ).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
-                    # elif mime == "application/pdf":
-                    #     content = drive_svc.files().get_media(fileId=file_id).execute()
-                    #     try:
-                    #         import io, pypdf
-                    #         reader = pypdf.PdfReader(io.BytesIO(content))
-                    #         for page in reader.pages:
-                    #             essay_text += page.extract_text() or ""
-                    #     except Exception:
-                    #         essay_text += content.decode("utf-8", errors="ignore")
-
+                    
                     elif mime == "application/pdf":
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         try:
@@ -906,18 +849,25 @@ def import_and_grade(
 
     print(f"📥 Found {len(local_subs)} submissions in local DB")
 
+    # for sub, student_user in local_subs:
+    #     essay_text = sub.essay_text
+    #     if not essay_text or not essay_text.strip():
+    #         continue
+
     for sub, student_user in local_subs:
+        # Skip submissions that came from Google Classroom — already graded above
+        if sub.file_name and sub.file_name.startswith("gc_"):
+            continue
+
         essay_text = sub.essay_text
         if not essay_text or not essay_text.strip():
             continue
 
+        # Skip placeholder text from sync
+        if essay_text.strip().startswith("[Submitted via Google Classroom"):
+            continue
+
         try:
-            # word_count = len(essay_text.split())
-            # grade = grade_with_local_model(
-            #     assignment=assignment,
-            #     essay_text=essay_text,
-            #     word_count=word_count,
-            # )
             word_count = len(essay_text.split())
             from routes.grading_prompt import build_grading_prompt
             prompt = build_grading_prompt(assignment, essay_text, word_count)
