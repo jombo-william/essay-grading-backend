@@ -94,15 +94,17 @@ Classify as EXACTLY ONE:
 - "partially relevant"
 - "off-topic"
 
+
 RULES:
 - "off-topic" → off_topic=true, total_score=0, ALL scores=0, STOP
-- "partially relevant" → total_score MUST NOT exceed {int(max_score * 0.30)}
-- ONLY "directly relevant" can exceed 30%
+- "partially relevant" → total_score MUST NOT exceed {int(max_score * 0.60)}
+- "directly relevant" → full marks possible
 
 IMPORTANT:
-- General discussion is NOT enough
-- Essay must clearly answer the question
-- Be strict — do NOT guess intent
+- If the essay addresses the topic in any meaningful way, classify as "directly relevant"
+- Only classify as "off-topic" if the essay has absolutely nothing to do with the topic
+- Give benefit of the doubt when content is related
+
 
 ═══════════════════════════════════════
 STEP 2 — LENGTH RULES
@@ -191,7 +193,7 @@ def parse_ai_response(raw_text: str, max_score: int) -> dict:
         score = 0
 
     if data.get("relevance_label") == "partially relevant":
-        score = min(score, int(max_score * 0.3))
+        score = min(score, int(max_score * 0.6))
 
     overall      = data.get("overall_feedback", "")
     strengths    = data.get("strengths", [])

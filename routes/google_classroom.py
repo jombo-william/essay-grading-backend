@@ -131,13 +131,53 @@ def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session
 # Place it after the existing create_gc_assignment() function
 
 
+# def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, db) -> bool:
+#     """
+#     Delete a coursework item from Google Classroom.
+#     Returns True if successfully deleted, False otherwise.
+#     The Classroom API only allows deletion of DRAFT coursework.
+#     For PUBLISHED items it sets state to DELETED instead.
+#     """
+#     gc_course_id = get_gc_course_id_for_class(class_id, db)
+#     if not gc_course_id:
+#         return False
+
+#     try:
+#         creds   = get_credentials(teacher_id, db)
+#         service = build("classroom", "v1", credentials=creds)
+
+#         # First check current state
+#         cw = service.courses().courseWork().get(
+#             courseId=gc_course_id,
+#             id=gc_coursework_id,
+#         ).execute()
+
+#         if cw.get("state") == "DRAFT":
+#             # DRAFT items can be fully deleted
+#             service.courses().courseWork().delete(
+#                 courseId=gc_course_id,
+#                 id=gc_coursework_id,
+#             ).execute()
+#             print(f"🗑️ Deleted DRAFT coursework {gc_coursework_id} from Google Classroom")
+#         else:
+#             # PUBLISHED items: patch state to DELETED
+#             service.courses().courseWork().patch(
+#                 courseId=gc_course_id,
+#                 id=gc_coursework_id,
+#                 updateMask="state",
+#                 body={"state": "DELETED"},
+#             ).execute()
+#             print(f"🗑️ Set PUBLISHED coursework {gc_coursework_id} to DELETED in Google Classroom")
+
+#         return True
+
+#     except Exception as e:
+#         print(f"⚠️ Could not delete Google Classroom coursework {gc_coursework_id}: {e}")
+#         return False
+
+
+
 def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, db) -> bool:
-    """
-    Delete a coursework item from Google Classroom.
-    Returns True if successfully deleted, False otherwise.
-    The Classroom API only allows deletion of DRAFT coursework.
-    For PUBLISHED items it sets state to DELETED instead.
-    """
     gc_course_id = get_gc_course_id_for_class(class_id, db)
     if not gc_course_id:
         return False
@@ -146,29 +186,34 @@ def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, 
         creds   = get_credentials(teacher_id, db)
         service = build("classroom", "v1", credentials=creds)
 
-        # First check current state
-        cw = service.courses().courseWork().get(
-            courseId=gc_course_id,
-            id=gc_coursework_id,
-        ).execute()
-
-        if cw.get("state") == "DRAFT":
-            # DRAFT items can be fully deleted
-            service.courses().courseWork().delete(
+        # Step 1 — check current state
+        try:
+            cw = service.courses().courseWork().get(
                 courseId=gc_course_id,
                 id=gc_coursework_id,
             ).execute()
-            print(f"🗑️ Deleted DRAFT coursework {gc_coursework_id} from Google Classroom")
-        else:
-            # PUBLISHED items: patch state to DELETED
+        except Exception as e:
+            if "404" in str(e):
+                print(f"ℹ️ Coursework {gc_coursework_id} not found in Google Classroom — already deleted")
+                return True  # not an error, just not there
+            raise  # re-raise other errors
+
+        # Step 2 — patch to DRAFT first if PUBLISHED
+        if cw.get("state") != "DRAFT":
             service.courses().courseWork().patch(
                 courseId=gc_course_id,
                 id=gc_coursework_id,
                 updateMask="state",
-                body={"state": "DELETED"},
+                body={"state": "DRAFT"},
             ).execute()
-            print(f"🗑️ Set PUBLISHED coursework {gc_coursework_id} to DELETED in Google Classroom")
+            print(f"📝 Set coursework {gc_coursework_id} to DRAFT")
 
+        # Step 3 — now delete
+        service.courses().courseWork().delete(
+            courseId=gc_course_id,
+            id=gc_coursework_id,
+        ).execute()
+        print(f"🗑️ Deleted coursework {gc_coursework_id} from Google Classroom")
         return True
 
     except Exception as e:
@@ -498,18 +543,51 @@ def import_and_grade(
                             fileId=file_id, mimeType="text/plain"
                         ).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
+                    # elif mime == "application/pdf":
+                    #     content = drive_svc.files().get_media(fileId=file_id).execute()
+                    #     try:
+                    #         import io, pypdf
+                    #         reader = pypdf.PdfReader(io.BytesIO(content))
+                    #         for page in reader.pages:
+                    #             essay_text += page.extract_text() or ""
+                    #     except Exception:
+                    #         essay_text += content.decode("utf-8", errors="ignore")
+
                     elif mime == "application/pdf":
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         try:
-                            import io, pypdf
+                            import io
+                            import pypdf
                             reader = pypdf.PdfReader(io.BytesIO(content))
+                            extracted = ""
                             for page in reader.pages:
-                                essay_text += page.extract_text() or ""
-                        except Exception:
+                                extracted += page.extract_text() or ""
+                            extracted = extracted.strip()
+                            if len(extracted) > 50:
+                                print(f"📄 PDF extracted {len(extracted)} chars: {extracted[:100]}")
+                                essay_text += extracted
+                            else:
+                                print(f"⚠️ pypdf got nothing — falling back to raw decode")
+                                essay_text += content.decode("utf-8", errors="ignore")
+                        except Exception as pdf_err:
+                            print(f"⚠️ pypdf failed: {pdf_err}")
                             essay_text += content.decode("utf-8", errors="ignore")
                     elif "text" in mime:
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
+                   
+                   
+                    elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"):
+                        # Word document — extract with python-docx
+                        try:
+                            import io
+                            from docx import Document
+                            content = drive_svc.files().get_media(fileId=file_id).execute()
+                            doc = Document(io.BytesIO(content))
+                            essay_text += "\n".join([para.text for para in doc.paragraphs])
+                            print(f"📄 Word doc extracted {len(essay_text)} chars")
+                        except Exception as docx_err:
+                            print(f"⚠️ Word doc extraction failed: {docx_err}")                   
                     else:
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
