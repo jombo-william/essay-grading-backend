@@ -33,20 +33,13 @@ except ImportError:
     GOOGLE_AVAILABLE = False
     print("❌ Google packages NOT installed — run: pip install google-auth google-auth-oauthlib google-api-python-client")
 
-# SCOPES = [
-#     "https://www.googleapis.com/auth/classroom.courses.readonly",
-#     "https://www.googleapis.com/auth/classroom.coursework.students",
-#     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
-#    #"https://www.googleapis.com/auth/classroom.grades",
-#     "https://www.googleapis.com/auth/drive.readonly",
-# ]
-
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.students",      # create/edit assignments
     "https://www.googleapis.com/auth/classroom.coursework.me",            # student submissions
     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
     "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+    "https://www.googleapis.com/auth/classroom.rosters.readonly",
     "https://www.googleapis.com/auth/drive.file",                         # upload files to Drive
     "https://www.googleapis.com/auth/drive.readonly",
 ]
@@ -83,6 +76,91 @@ def get_gc_course_id_for_class(class_id: int, db: Session):
     """Get the linked Google Classroom course ID for a local class."""
     cls = db.query(models.Class).filter_by(id=class_id).first()
     return cls.gc_course_id if cls else None
+
+
+
+
+def sync_gc_students_to_db(course_id: str, service, db) -> dict:
+    """
+    Fetch all students from a Google Classroom course and create
+    local accounts for them if they don't exist yet.
+    Returns a dict of {gc_user_id: local_student_id}
+    """
+    import secrets
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+    try:
+        result = service.courses().students().list(courseId=course_id).execute()
+        gc_students = result.get("students", [])
+        print(f"👥 Found {len(gc_students)} students in Google Classroom")
+    except Exception as e:
+        print(f"⚠️ Could not fetch students: {e}")
+        return {}
+
+    gc_id_to_local = {}
+
+    for gs in gc_students:
+        profile   = gs.get("profile", {})
+        gc_uid    = gs.get("userId", "")
+        name      = profile.get("name", {}).get("fullName", "Unknown Student")
+        email     = profile.get("emailAddress", f"{gc_uid}@classroom.google.com")
+
+        if not gc_uid:
+            continue
+
+        # Check if already linked
+        token_row = db.query(models.StudentGoogleToken).filter_by(
+            gc_user_id=gc_uid
+        ).first()
+
+        if token_row:
+            gc_id_to_local[gc_uid] = token_row.student_id
+            continue
+
+        # Check if user with this email already exists
+        existing_user = db.query(models.User).filter_by(email=email).first()
+
+        if existing_user:
+            student_id = existing_user.id
+        else:
+            # Create new student account
+            random_password = secrets.token_urlsafe(16)
+            hashed          = pwd_context.hash(random_password)
+            new_user = models.User(
+                name     = name,
+                email    = email,
+                password = hashed,
+                role     = "student",
+            )
+            db.add(new_user)
+            db.flush()  # get the id
+            student_id = new_user.id
+            print(f"✅ Created student account: {name} ({email})")
+
+        # Link gc_user_id to local student
+        existing_token = db.query(models.StudentGoogleToken).filter_by(
+            student_id=student_id
+        ).first()
+
+        if not existing_token:
+            db.add(models.StudentGoogleToken(
+                student_id    = student_id,
+                access_token  = "gc_sync",
+                refresh_token = None,
+                gc_user_id    = gc_uid,
+            ))
+
+        gc_id_to_local[gc_uid] = student_id
+
+    db.commit()
+    print(f"✅ Synced {len(gc_id_to_local)} students to local DB")
+    return gc_id_to_local
+
+
+
+
+
 
 
 def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session):
@@ -473,6 +551,90 @@ def sync_gc_assignments(
         created += 1
 
     db.commit()
+
+
+
+
+    # ── Also sync students and their submissions ──────────────────────────
+    gc_id_to_local = sync_gc_students_to_db(course_id, service, db)
+
+    # Enroll synced students into the local class
+    for gc_uid, student_id in gc_id_to_local.items():
+        exists = db.query(models.ClassEnrollment).filter_by(
+            class_id=cls.id, student_id=student_id
+        ).first()
+        if not exists:
+            db.add(models.ClassEnrollment(class_id=cls.id, student_id=student_id))
+    db.commit()
+
+    # Fetch all submissions for all assignments in this course
+    local_assignments = db.query(models.Assignment).filter_by(
+        class_id=cls.id
+    ).all()
+
+    submissions_synced = 0
+    for local_assignment in local_assignments:
+        if not local_assignment.gc_coursework_id:
+            continue
+        try:
+            subs_result = service.courses().courseWork().studentSubmissions().list(
+                courseId     = course_id,
+                courseWorkId = local_assignment.gc_coursework_id,
+                states       = ["TURNED_IN", "RETURNED"]
+            ).execute()
+            gc_subs = subs_result.get("studentSubmissions", [])
+
+            for gc_sub in gc_subs:
+                gc_uid    = gc_sub.get("userId", "")
+                student_id = gc_id_to_local.get(gc_uid)
+                if not student_id:
+                    continue
+
+                # Check if submission already exists
+                existing_sub = db.query(models.Submission).filter_by(
+                    assignment_id = local_assignment.id,
+                    student_id    = student_id,
+                ).first()
+
+                if existing_sub:
+                    continue  # already synced
+
+                # Get assigned grade if any
+                assigned_grade = gc_sub.get("assignedGrade")
+                draft_grade    = gc_sub.get("draftGrade")
+                gc_score       = assigned_grade or draft_grade
+
+                new_sub = models.Submission(
+                    assignment_id      = local_assignment.id,
+                    student_id         = student_id,
+                    essay_text         = "[Submitted via Google Classroom — use Grade button to extract and grade]",
+                    submit_mode        = "upload",
+                    file_name          = f"gc_{gc_uid}",
+                    ai_score           = int(gc_score) if gc_score is not None else None,
+                    ai_feedback        = None,
+                    ai_detection_score = 0,
+                    status             = "ai_graded" if gc_score is not None else "submitted",
+                )
+                db.add(new_sub)
+                submissions_synced += 1
+
+        except Exception as e:
+            print(f"⚠️ Could not sync submissions for assignment {local_assignment.id}: {e}")
+
+    db.commit()
+    print(f"✅ Synced {submissions_synced} submissions from Google Classroom")
+    # ─────────────────────────────────────────────────────────────────────
+
+    print(f"✅ Sync complete: {created} created, {skipped} already existed")
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped,
+        "students_synced": len(gc_id_to_local),
+        "submissions_synced": submissions_synced,
+        "message": f"{created} assignment(s) imported, {len(gc_id_to_local)} students synced, {submissions_synced} submissions synced.",
+    }
+
 
     print(f"✅ Sync complete: {created} created, {skipped} already existed")
     return {
