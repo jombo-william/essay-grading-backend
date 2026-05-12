@@ -13,7 +13,13 @@ HF_API_KEY     = os.getenv("HF_API_KEY", "")
 print(f"🔑 GEMINI_API_KEY loaded: {'YES' if GEMINI_API_KEY else 'NO - KEY IS MISSING'}")
 print(f"🔑 HF_API_KEY loaded: {'YES' if HF_API_KEY else 'NO - KEY IS MISSING'}")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+#GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+GEMINI_MODELS = [
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
+]
 
 HF_MODELS = [
     {
@@ -41,23 +47,58 @@ HF_MODELS = [
 ]
 
 
+# def call_gemini(prompt: str) -> str:
+#     resp = http_requests.post(
+#         f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+#         headers={"Content-Type": "application/json"},
+#         json={
+#             "contents": [{"parts": [{"text": prompt}]}],
+#             "generationConfig": {
+#                 "temperature": 0.0,
+#                 "maxOutputTokens": 1500,
+#                 "topP": 1.0,
+#                 "topK": 1,
+#             },
+#         },
+#         timeout=60,
+#     )
+#     resp.raise_for_status()
+#     return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+
 def call_gemini(prompt: str) -> str:
-    resp = http_requests.post(
-        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 1500,
-                "topP": 1.0,
-                "topK": 1,
-            },
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    last_error = None
+    for model_url in GEMINI_MODELS:
+        try:
+            resp = http_requests.post(
+                f"{model_url}?key={GEMINI_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "maxOutputTokens": 1500,
+                        "topP": 1.0,
+                        "topK": 1,
+                    },
+                },
+                timeout=60,
+            )
+            if resp.status_code == 429:
+                print(f"⏳ {model_url.split('models/')[1].split(':')[0]} rate limited — trying next...")
+                last_error = resp
+                continue
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except http_requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 429:
+                print(f"⏳ Rate limited — trying next Gemini model...")
+                last_error = e
+                continue
+            raise
+    raise http_requests.exceptions.HTTPError(f"All Gemini models rate limited") if last_error else Exception("All Gemini models failed")
+
 
 
 def call_huggingface(prompt: str) -> str:
@@ -167,8 +208,15 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             parsed = parse_ai_response(raw, max_score)
             parsed.setdefault("low_confidence", False)
             parsed.setdefault("graded_by", "huggingface")
+            # if parsed.get("score", 0) > 0 or parsed.get("off_topic"):
+            #     print(f"✅ HuggingFace graded — score: {parsed.get('score')}")
+            #     return parsed
+
             if parsed.get("score", 0) > 0 or parsed.get("off_topic"):
-                print(f"✅ HuggingFace graded — score: {parsed.get('score')}")
+               # parsed["score"] = min(parsed.get("score", 0), round(max_score * 0.80))
+                #print(f"✅ HuggingFace graded — score: {parsed.get('score')} (capped at 80%)")
+                parsed["score"] = min(parsed.get("score", 0), round(max_score * 0.65))
+                print(f"✅ HuggingFace graded — score: {parsed.get('score')} (capped at 65%)")
                 return parsed
             else:
                 print("⚠️ HuggingFace returned score=0 — not trustworthy, falling through...")
