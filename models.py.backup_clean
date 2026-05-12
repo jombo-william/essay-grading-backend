@@ -114,6 +114,7 @@ class Assignment(Base):
     instructions       = Column(Text, nullable=False)
     reference_material = Column(Text, nullable=True)
     max_score          = Column(Integer, default=100)
+    due_date           = Column(DateTime, nullable=False)
     rubric             = Column(Text, nullable=True)  # JSON string
     is_active          = Column(Boolean, default=True)
     gc_coursework_id   = Column(String(100), nullable=True)
@@ -190,6 +191,7 @@ class Exam(Base):
     title        = Column(String(255), nullable=False)
     description  = Column(Text, nullable=True)
     instructions = Column(Text, nullable=False)
+    due_date     = Column(DateTime, nullable=False)
     time_limit   = Column(Integer, default=60)       # minutes
     is_active    = Column(Boolean, default=True)
     created_at   = Column(TIMESTAMP, server_default=func.now())
@@ -290,7 +292,7 @@ class StudentGoogleToken(Base):
 class Quiz(Base):
     __tablename__ = "quizzes"
     __table_args__ = {"extend_existing": True}
-
+    
     id = Column(Integer, primary_key=True, index=True)
     teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String(255), nullable=False)
@@ -303,8 +305,5 @@ class Quiz(Base):
     shuffle_answers = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    moodle_assignment_id = Column(Integer, nullable=True)
-    moodle_course_id = Column(Integer, nullable=True)
-    synced_to_moodle = Column(Boolean, default=False)
     
     teacher = relationship("User", back_populates="quizzes")

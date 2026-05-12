@@ -1,0 +1,262 @@
+import requests
+import json
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from typing import Optional, List
+from datetime import datetime
+from sqlalchemy.orm import Session
+from sqlalchemy import desc
+from auth_utils import require_teacher
+from database import get_db
+import models
+import os
+
+router = APIRouter(prefix="/moodle", tags=["Moodle Quizzes"])
+
+MOODLE_URL = os.getenv("MOODLE_URL", "https://essaygrade.moodlecloud.com")
+MOODLE_TOKEN = os.getenv("MOODLE_TOKEN")
+
+def moodle_call(token: str, function: str, params: dict):
+    """Make a Moodle Web Service call."""
+    url = f"{MOODLE_URL}/webservice/rest/server.php"
+    try:
+        response = requests.post(
+            url,
+            data={
+                "wstoken": token,
+                "wsfunction": function,
+                "moodlewsrestformat": "json",
+                **params
+            },
+            timeout=30
+        )
+        data = response.json()
+        if isinstance(data, dict) and data.get("exception"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Moodle error: {data.get('message', 'Unknown error')}"
+            )
+        return data
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to Moodle at {MOODLE_URL}"
+        )
+
+class QuestionOption(BaseModel):
+    text: str
+    is_correct: bool = False
+
+class QuizQuestion(BaseModel):
+    question_text: str
+    question_type: str
+    points: float = 1.0
+    options: Optional[List[QuestionOption]] = None
+    correct_answer: Optional[str] = None
+
+class CreateQuizRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    course_id: Optional[int] = None
+    time_limit_minutes: Optional[int] = None
+    shuffle_questions: bool = False
+    shuffle_answers: bool = False
+    questions: List[QuizQuestion]
+
+@router.get("/quizzes")
+def get_quizzes(
+    moodle_token: str = Query(...),
+    site_url: str = Query(...),
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_teacher)
+):
+    user = ctx["user"]
+    quizzes = db.query(models.Quiz).filter(
+        models.Quiz.teacher_id == user.id
+    ).order_by(desc(models.Quiz.created_at)).all()
+    
+    return {
+        "success": True,
+        "quizzes": [
+            {
+                "id": q.id,
+                "title": q.title,
+                "description": q.description,
+                "moodle_quiz_id": q.moodle_quiz_id,
+                "moodle_course_id": q.moodle_course_id,
+                "time_limit_minutes": q.time_limit_minutes,
+                "question_count": len(q.questions) if isinstance(q.questions, list) else 0,
+                "created_at": q.created_at.isoformat() if q.created_at else None,
+                "synced_to_moodle": q.moodle_quiz_id is not None
+            }
+            for q in quizzes
+        ]
+    }
+
+@router.post("/create-quiz")
+def create_quiz_in_moodle(
+    quiz_data: CreateQuizRequest,
+    moodle_token: str = Query(...),
+    site_url: str = Query(...),
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_teacher)
+):
+    user = ctx["user"]
+    questions_json = [q.dict() for q in quiz_data.questions]
+    
+    quiz = models.Quiz(
+        teacher_id=user.id,
+        title=quiz_data.title,
+        description=quiz_data.description,
+        questions=questions_json,
+        moodle_course_id=quiz_data.course_id,
+        time_limit_minutes=quiz_data.time_limit_minutes,
+        shuffle_questions=quiz_data.shuffle_questions,
+        shuffle_answers=quiz_data.shuffle_answers,
+        moodle_quiz_id=None
+    )
+    
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    
+    moodle_synced = False
+    moodle_quiz_id = None
+    
+    if quiz_data.course_id and quiz_data.course_id > 0:
+        try:
+            create_params = {
+                "courseid": quiz_data.course_id,
+                "name": quiz_data.title,
+                "intro": quiz_data.description or "",
+                "introformat": 1,
+                "timelimit": (quiz_data.time_limit_minutes or 0) * 60,
+            }
+            
+            result = moodle_call(
+                token=moodle_token,
+                function="mod_quiz_add_quiz",
+                params=create_params
+            )
+            
+            moodle_quiz_id = result.get("id")
+            if moodle_quiz_id:
+                quiz.moodle_quiz_id = moodle_quiz_id
+                moodle_synced = True
+                db.commit()
+        except Exception as e:
+            print(f"Sync error: {e}")
+    
+    return {
+        "success": True,
+        "message": f"Quiz created" + (" and synced to Moodle!" if moodle_synced else ""),
+        "local_quiz_id": quiz.id,
+        "moodle_quiz_id": moodle_quiz_id,
+        "synced_to_moodle": moodle_synced,
+        "quiz": {"id": quiz.id, "title": quiz.title, "question_count": len(questions_json)}
+    }
+
+@router.post("/sync-quiz/{quiz_id}")
+def sync_quiz_to_moodle(
+    quiz_id: int,
+    moodle_course_id: int = Query(...),
+    moodle_token: str = Query(...),
+    site_url: str = Query(...),
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_teacher)
+):
+    """Manually sync an existing quiz to Moodle"""
+    user = ctx["user"]
+    
+    quiz = db.query(models.Quiz).filter(
+        models.Quiz.id == quiz_id,
+        models.Quiz.teacher_id == user.id
+    ).first()
+    
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    
+    if quiz.moodle_quiz_id:
+        return {"success": False, "message": f"Quiz already synced (Moodle ID: {quiz.moodle_quiz_id})"}
+    
+    try:
+        create_params = {
+            "courseid": moodle_course_id,
+            "name": quiz.title,
+            "intro": quiz.description or "",
+            "introformat": 1,
+            "timelimit": (quiz.time_limit_minutes or 0) * 60,
+        }
+        
+        result = moodle_call(token=moodle_token, function="mod_quiz_add_quiz", params=create_params)
+        moodle_quiz_id = result.get("id")
+        
+        if moodle_quiz_id:
+            questions = quiz.questions if isinstance(quiz.questions, list) else json.loads(quiz.questions)
+            for idx, q in enumerate(questions):
+                question_params = {
+                    "quizid": moodle_quiz_id,
+                    "name": f"Q{idx+1}: {q.get('question_text', '')[:50]}",
+                    "questiontext": q.get('question_text', ''),
+                    "questiontextformat": 1,
+                    "defaultmark": q.get('points', 1),
+                }
+                
+                if q.get('question_type') == "multiple_choice":
+                    question_params["type"] = "multichoice"
+                    question_params["single"] = 1
+                    for opt_idx, opt in enumerate(q.get('options', [])):
+                        question_params[f"answer_{opt_idx+1}"] = opt.get('text', '')
+                        question_params[f"fraction_{opt_idx+1}"] = 1.0 if opt.get('is_correct') else 0.0
+                elif q.get('question_type') == "true_false":
+                    question_params["type"] = "truefalse"
+                elif q.get('question_type') == "essay":
+                    question_params["type"] = "essay"
+                else:
+                    question_params["type"] = "shortanswer"
+                
+                moodle_call(token=moodle_token, function="mod_quiz_add_question", params=question_params)
+            
+            quiz.moodle_quiz_id = moodle_quiz_id
+            quiz.moodle_course_id = moodle_course_id
+            db.commit()
+            
+            return {"success": True, "message": f"Quiz synced! Moodle ID: {moodle_quiz_id}", "moodle_quiz_id": moodle_quiz_id}
+        else:
+            return {"success": False, "message": f"Failed: {result}"}
+    except Exception as e:
+        return {"success": False, "message": f"Sync failed: {str(e)}"}
+
+@router.get("/quiz-results/{quiz_id}")
+def get_quiz_results(
+    quiz_id: int,
+    moodle_token: str = Query(...),
+    site_url: str = Query(...),
+    db: Session = Depends(get_db),
+    ctx: dict = Depends(require_teacher)
+):
+    user = ctx["user"]
+    quiz = db.query(models.Quiz).filter(
+        models.Quiz.id == quiz_id,
+        models.Quiz.teacher_id == user.id
+    ).first()
+    
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    
+    questions_data = quiz.questions if isinstance(quiz.questions, list) else json.loads(quiz.questions)
+    
+    return {
+        "success": True,
+        "quiz": {
+            "id": quiz.id,
+            "title": quiz.title,
+            "description": quiz.description,
+            "questions": questions_data,
+            "total_questions": len(questions_data),
+            "time_limit_minutes": quiz.time_limit_minutes,
+            "created_at": quiz.created_at.isoformat() if quiz.created_at else None,
+            "synced_to_moodle": quiz.moodle_quiz_id is not None
+        },
+        "results": {"total_submissions": 0, "message": "No submissions yet"}
+    }
