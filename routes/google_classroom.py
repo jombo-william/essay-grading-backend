@@ -684,10 +684,23 @@ def import_and_grade(
     gc_user_ids = set()
 
     # ── Grade Google Classroom submissions ────────────────────────────────────
+    # for gs in student_subs:
+    #     gc_uid = gs.get("userId", "unknown")
+    #     gc_user_ids.add(gc_uid)
+    #     essay_text  = ""
+
     for gs in student_subs:
         gc_uid = gs.get("userId", "unknown")
         gc_user_ids.add(gc_uid)
         essay_text  = ""
+
+        # Look up student name from local DB
+        gc_token_row = db.query(models.StudentGoogleToken).filter_by(gc_user_id=gc_uid).first()
+        if gc_token_row:
+            student_user_row = db.query(models.User).filter_by(id=gc_token_row.student_id).first()
+            student_name = student_user_row.name if student_user_row else gc_uid
+        else:
+            student_name = gc_uid
         attachments = gs.get("assignmentSubmission", {}).get("attachments", [])
 
         for att in attachments:
@@ -760,7 +773,7 @@ def import_and_grade(
 
         if not essay_text.strip():
             results.append({
-                "google_student_id": gc_uid,
+                "google_student_id": student_name,
                 "error":             "No text content found in submission",
                 "status":            "skipped",
                 "source":            "google_classroom",
@@ -867,7 +880,7 @@ def import_and_grade(
                 print(f"⚠️ Could not post grade to Google Classroom: {grade_err}")
 
             results.append({
-                "google_student_id": gc_uid,
+                "google_student_id": student_name,
                 "score":             grade["score"],
                 "feedback":          grade["feedback"],
                 "status":            "graded",
@@ -878,7 +891,7 @@ def import_and_grade(
             db.rollback()
             print(f"❌ Grading failed for {gc_uid}: {e}")
             results.append({
-                "google_student_id": gc_uid,
+                "google_student_id": student_name,
                 "error":             str(e),
                 "status":            "failed",
                 "source":            "google_classroom",
@@ -923,7 +936,7 @@ def import_and_grade(
             db.commit()
 
             results.append({
-                "google_student_id": f"local_{student_user.id}",
+               "google_student_id": student_user.name,
                 "student_name":      student_user.name,
                 "score":             grade["score"],
                 "feedback":          grade["feedback"],
@@ -936,7 +949,7 @@ def import_and_grade(
             db.rollback()
             print(f"❌ Local grading failed for {student_user.name}: {e}")
             results.append({
-                "google_student_id": f"local_{student_user.id}",
+                "google_student_id": student_user.name,
                 "error":             str(e),
                 "status":            "failed",
                 "source":            "local",
