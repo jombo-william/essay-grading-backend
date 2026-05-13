@@ -33,7 +33,7 @@
 # from sqlalchemy.orm import sessionmaker, declarative_base
 # from dotenv import load_dotenv
 
-# # C:\Users\comadmin\Desktop\jombo\essayf-and-backend\backend\backend-jombo-essaygrade\database.py
+# # C:\Users\comadm, in\Desktop\jombo\essayf-and-backend\backend\backend-jombo-essaygrade\database.py
 # load_dotenv()
 
 # # Reads DATABASE_URL from your .env file
@@ -106,9 +106,10 @@ DB_USER     = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME     = os.getenv("DB_NAME", "essay_grading")
 
+# 
 DATABASE_URL = (
     os.getenv("DATABASE_URL")
-    or f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    or "postgresql://postgres.yyrqliklmlwvkkjhjfge:WJomBo.W%2F%40Tw2111@aws-1-eu-west-1.pooler.supabase.com:6543/postgres"
 )
 
 print(f"🗄️  Connecting to: {DATABASE_URL[:40]}...")

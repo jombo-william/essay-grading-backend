@@ -188,96 +188,96 @@ class AIDetectionLog(Base):
 
     submission = relationship("Submission", back_populates="ai_detection")
 
-class Quiz(Base):
-    __tablename__ = "quizzes"
+# class Quiz(Base):
+#     __tablename__ = "quizzes"
 
-    id               = Column(Integer, primary_key=True, index=True)
-    teacher_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    class_id         = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=True)
+#     id               = Column(Integer, primary_key=True, index=True)
+#     teacher_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+#     class_id         = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=True)
 
-    title            = Column(String(255), nullable=False)
-    description      = Column(Text, nullable=True)
-    instructions     = Column(Text, nullable=True)
-    time_limit       = Column(Integer, default=60)
-    due_date         = Column(DateTime, nullable=False)
-    is_active        = Column(Boolean, default=True)
+#     title            = Column(String(255), nullable=False)
+#     description      = Column(Text, nullable=True)
+#     instructions     = Column(Text, nullable=True)
+#     time_limit       = Column(Integer, default=60)
+#     due_date         = Column(DateTime, nullable=False)
+#     is_active        = Column(Boolean, default=True)
 
-    moodle_quiz_id   = Column(Integer, nullable=True)
-    moodle_course_id = Column(Integer, nullable=True)
-    moodle_site_url  = Column(String(255), nullable=True)
+#     moodle_quiz_id   = Column(Integer, nullable=True)
+#     moodle_course_id = Column(Integer, nullable=True)
+#     moodle_site_url  = Column(String(255), nullable=True)
 
-    created_at       = Column(TIMESTAMP, server_default=func.now())
-    updated_at       = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+#     created_at       = Column(TIMESTAMP, server_default=func.now())
+#     updated_at       = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-    teacher   = relationship("User", foreign_keys=[teacher_id])
-    cls       = relationship("Class", foreign_keys=[class_id])
-    questions = relationship("QuizQuestion", back_populates="quiz", cascade="all, delete-orphan")
-    attempts  = relationship("QuizAttempt", back_populates="quiz", cascade="all, delete-orphan")
-
-
-class QuizQuestion(Base):
-    __tablename__ = "quiz_questions"
-
-    id             = Column(Integer, primary_key=True, index=True)
-    quiz_id        = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
-
-    type           = Column(String(20), nullable=False)  # mcq / structured
-    prompt         = Column(Text, nullable=False)
-    marks          = Column(Integer, default=1)
-
-    options        = Column(Text, nullable=True)   # JSON string
-    correct_option = Column(String(1), nullable=True)
-
-    marking_guide  = Column(Text, nullable=True)
-    order_index    = Column(Integer, default=0)
-
-    created_at     = Column(TIMESTAMP, server_default=func.now())
-
-    quiz    = relationship("Quiz", back_populates="questions")
-    answers = relationship("QuizAnswer", back_populates="question")
+#     teacher   = relationship("User", foreign_keys=[teacher_id])
+#     cls       = relationship("Class", foreign_keys=[class_id])
+#     questions = relationship("QuizQuestion", back_populates="quiz", cascade="all, delete-orphan")
+#     attempts  = relationship("QuizAttempt", back_populates="quiz", cascade="all, delete-orphan")
 
 
-class QuizAttempt(Base):
-    __tablename__ = "quiz_attempts"
+# class QuizQuestion(Base):
+#     __tablename__ = "quiz_questions"
 
-    id                = Column(Integer, primary_key=True, index=True)
-    quiz_id           = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
-    student_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+#     id             = Column(Integer, primary_key=True, index=True)
+#     quiz_id        = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
 
-    status            = Column(String(20), default="submitted")
-    total_score       = Column(Integer, nullable=True)
-    max_score         = Column(Integer, nullable=True)
+#     type           = Column(String(20), nullable=False)  # mcq / structured
+#     prompt         = Column(Text, nullable=False)
+#     marks          = Column(Integer, default=1)
 
-    started_at        = Column(TIMESTAMP, server_default=func.now())
-    submitted_at      = Column(TIMESTAMP, nullable=True)
-    graded_at         = Column(TIMESTAMP, nullable=True)
+#     options        = Column(Text, nullable=True)   # JSON string
+#     correct_option = Column(String(1), nullable=True)
 
-    moodle_attempt_id = Column(Integer, nullable=True)
+#     marking_guide  = Column(Text, nullable=True)
+#     order_index    = Column(Integer, default=0)
 
-    quiz    = relationship("Quiz", back_populates="attempts")
-    student = relationship("User", foreign_keys=[student_id])
-    answers = relationship("QuizAnswer", back_populates="attempt", cascade="all, delete-orphan")
+#     created_at     = Column(TIMESTAMP, server_default=func.now())
+
+#     quiz    = relationship("Quiz", back_populates="questions")
+#     answers = relationship("QuizAnswer", back_populates="question")
 
 
-class QuizAnswer(Base):
-    __tablename__ = "quiz_answers"
+# class QuizAttempt(Base):
+#     __tablename__ = "quiz_attempts"
 
-    id              = Column(Integer, primary_key=True, index=True)
-    attempt_id      = Column(Integer, ForeignKey("quiz_attempts.id", ondelete="CASCADE"), nullable=False)
-    question_id     = Column(Integer, ForeignKey("quiz_questions.id", ondelete="CASCADE"), nullable=False)
+#     id                = Column(Integer, primary_key=True, index=True)
+#     quiz_id           = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
+#     student_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
-    answer_text     = Column(Text, nullable=True)
-    selected_option = Column(String(1), nullable=True)
+#     status            = Column(String(20), default="submitted")
+#     total_score       = Column(Integer, nullable=True)
+#     max_score         = Column(Integer, nullable=True)
 
-    is_correct      = Column(Boolean, nullable=True)
-    score_awarded   = Column(Integer, nullable=True)
+#     started_at        = Column(TIMESTAMP, server_default=func.now())
+#     submitted_at      = Column(TIMESTAMP, nullable=True)
+#     graded_at         = Column(TIMESTAMP, nullable=True)
 
-    ai_feedback     = Column(Text, nullable=True)
+#     moodle_attempt_id = Column(Integer, nullable=True)
 
-    created_at      = Column(TIMESTAMP, server_default=func.now())
+#     quiz    = relationship("Quiz", back_populates="attempts")
+#     student = relationship("User", foreign_keys=[student_id])
+#     answers = relationship("QuizAnswer", back_populates="attempt", cascade="all, delete-orphan")
 
-    attempt  = relationship("QuizAttempt", back_populates="answers")
-    question = relationship("QuizQuestion", back_populates="answers")
+
+# class QuizAnswer(Base):
+#     __tablename__ = "quiz_answers"
+
+#     id              = Column(Integer, primary_key=True, index=True)
+#     attempt_id      = Column(Integer, ForeignKey("quiz_attempts.id", ondelete="CASCADE"), nullable=False)
+#     question_id     = Column(Integer, ForeignKey("quiz_questions.id", ondelete="CASCADE"), nullable=False)
+
+#     answer_text     = Column(Text, nullable=True)
+#     selected_option = Column(String(1), nullable=True)
+
+#     is_correct      = Column(Boolean, nullable=True)
+#     score_awarded   = Column(Integer, nullable=True)
+
+#     ai_feedback     = Column(Text, nullable=True)
+
+#     created_at      = Column(TIMESTAMP, server_default=func.now())
+
+#     attempt  = relationship("QuizAttempt", back_populates="answers")
+#     question = relationship("QuizQuestion", back_populates="answers")
 class Exam(Base):
     __tablename__ = "exams"
 
@@ -364,3 +364,16 @@ class ExamAnswer(Base):
 
     submission = relationship("ExamSubmission", back_populates="answers")
     question   = relationship("ExamQuestion", foreign_keys=[question_id])
+
+    class StudentMoodleToken(Base):
+        __tablename__ = "student_moodle_tokens"
+
+        id = Column(Integer, primary_key=True, index=True)
+
+        student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+        moodle_token = Column(Text, nullable=False)
+
+        moodle_url = Column(String, nullable=True)
+
+        created_at = Column(DateTime(timezone=True), server_default=func.now())
