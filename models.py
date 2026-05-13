@@ -166,17 +166,17 @@ class Submission(Base):
     moodle_assignment_id = Column(Integer, nullable=True)
     moodle_course_id     = Column(Integer, nullable=True)
 
-    final_score      = Column(Integer, nullable=True)
-    teacher_feedback = Column(Text, nullable=True)
-    graded_at        = Column(TIMESTAMP, nullable=True)
+    # final_score      = Column(Integer, nullable=True)
+    # teacher_feedback = Column(Text, nullable=True)
+    # graded_at        = Column(TIMESTAMP, nullable=True)
 
-    status = Column(
-        Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
-        default="pending"
-    )
+    # status = Column(
+    #     Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
+    #     default="pending"
+    # )
 
-    submitted_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    # submitted_at = Column(TIMESTAMP, server_default=func.now())
+    # updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     assignment   = relationship("Assignment", back_populates="submissions")
     student      = relationship("User", back_populates="submissions")
