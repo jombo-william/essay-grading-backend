@@ -1,5 +1,8 @@
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
+
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -13,7 +16,8 @@ class User(Base):
     email               = Column(String(150), unique=True, nullable=False)
     password            = Column(String(255), nullable=False)
     #role                = Column(Enum("teacher", "student"), nullable=False)
-    role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
+    role = Column(String(20), nullable=False)
+    #role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
     registration_number = Column(String(50), nullable=True)
     phone               = Column(String(20), nullable=True)
     is_active           = Column(Boolean, default=True)
@@ -149,7 +153,8 @@ class Submission(Base):
     assignment_id      = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
     student_id         = Column(Integer, ForeignKey("users.id",       ondelete="CASCADE"), nullable=False)
     essay_text         = Column(Text, nullable=False)
-    submit_mode        = Column(Enum("write", "upload"), default="write")
+    submit_mode = Column(String(20), default="write")
+    #submit_mode        = Column(Enum("write", "upload"), default="write")
     file_name          = Column(String(255), nullable=True)
     file_path          = Column(String(500), nullable=True)
     ai_score           = Column(Integer, nullable=True)
@@ -159,7 +164,8 @@ class Submission(Base):
     final_score        = Column(Integer, nullable=True)
     teacher_feedback   = Column(Text, nullable=True)
     graded_at          = Column(TIMESTAMP, nullable=True)
-    status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
+    status = Column(String(20), default="pending")
+    #status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
     submitted_at       = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
     # In models.py add these two columns to your Assignment model
@@ -212,7 +218,8 @@ class ExamQuestion(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     exam_id        = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
-    type           = Column(Enum("mcq", "structured"), nullable=False)
+    type = Column(String(20), nullable=False)
+    #type           = Column(Enum("mcq", "structured"), nullable=False)
     prompt         = Column(Text, nullable=False)
     marks          = Column(Integer, default=1)
     options        = Column(Text, nullable=True)    # JSON array ["opt A", "opt B", "opt C", "opt D"]
@@ -230,7 +237,8 @@ class ExamSubmission(Base):
     id           = Column(Integer, primary_key=True, index=True)
     exam_id      = Column(Integer, ForeignKey("exams.id",  ondelete="CASCADE"), nullable=False)
     student_id   = Column(Integer, ForeignKey("users.id",  ondelete="CASCADE"), nullable=False)
-    status       = Column(Enum("submitted", "graded"), default="submitted")
+    status = Column(String(20), default="submitted")
+    #status       = Column(Enum("submitted", "graded"), default="submitted")
     total_score  = Column(Integer, nullable=True)
     submitted_at = Column(TIMESTAMP, server_default=func.now())
     graded_at    = Column(TIMESTAMP, nullable=True)

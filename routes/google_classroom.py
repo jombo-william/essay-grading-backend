@@ -80,14 +80,93 @@ def get_gc_course_id_for_class(class_id: int, db: Session):
 
 
 
+# def sync_gc_students_to_db(course_id: str, service, db) -> dict:
+#     """
+#     Fetch all students from a Google Classroom course and create
+#     local accounts for them if they don't exist yet.
+#     Returns a dict of {gc_user_id: local_student_id}
+#     """
+#     import secrets
+#     from passlib.context import CryptContext
+#     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+#     try:
+#         result = service.courses().students().list(courseId=course_id).execute()
+#         gc_students = result.get("students", [])
+#         print(f"👥 Found {len(gc_students)} students in Google Classroom")
+#     except Exception as e:
+#         print(f"⚠️ Could not fetch students: {e}")
+#         return {}
+
+#     gc_id_to_local = {}
+
+#     for gs in gc_students:
+#         profile   = gs.get("profile", {})
+#         gc_uid    = gs.get("userId", "")
+#         name      = profile.get("name", {}).get("fullName", "Unknown Student")
+#         email     = profile.get("emailAddress", f"{gc_uid}@classroom.google.com")
+
+#         if not gc_uid:
+#             continue
+
+#         # Check if already linked
+#         token_row = db.query(models.StudentGoogleToken).filter_by(
+#             gc_user_id=gc_uid
+#         ).first()
+
+#         if token_row:
+#             gc_id_to_local[gc_uid] = token_row.student_id
+#             continue
+
+#         # Check if user with this email already exists
+#         existing_user = db.query(models.User).filter_by(email=email).first()
+
+#         if existing_user:
+#             student_id = existing_user.id
+#         else:
+#             # Create new student account
+#             random_password = secrets.token_urlsafe(16)
+#             hashed          = pwd_context.hash(random_password)
+#             # new_user = models.User(
+#             #     name     = name,
+#             #     email    = email,
+#             #     password = hashed,
+#             #     role     = "student",
+#             # )
+#             from sqlalchemy import text
+
+#             # Insert user via raw SQL to avoid PostgreSQL ENUM compile error
+#             db.execute(
+#                 text("INSERT INTO users (name, email, password, role) VALUES (:name, :email, :password, 'student')"),
+#                 {"name": name, "email": email, "password": hashed}
+#             )
+#             db.flush()
+
+#             # Get the newly created user
+#             new_user = db.query(models.User).filter_by(email=email).first()
+#             student_id = new_user.id
+#             print(f"✅ Created student account: {name} ({email})")
+                
+
+#         if not existing_token:
+#             db.add(models.StudentGoogleToken(
+#                 student_id    = student_id,
+#                 access_token  = "gc_sync",
+#                 refresh_token = None,
+#                 gc_user_id    = gc_uid,
+#             ))
+
+#         gc_id_to_local[gc_uid] = student_id
+
+#     db.commit()
+#     print(f"✅ Synced {len(gc_id_to_local)} students to local DB")
+#     return gc_id_to_local
+
+
 def sync_gc_students_to_db(course_id: str, service, db) -> dict:
-    """
-    Fetch all students from a Google Classroom course and create
-    local accounts for them if they don't exist yet.
-    Returns a dict of {gc_user_id: local_student_id}
-    """
     import secrets
     from passlib.context import CryptContext
+    from sqlalchemy import text
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     try:
@@ -101,19 +180,16 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
     gc_id_to_local = {}
 
     for gs in gc_students:
-        profile   = gs.get("profile", {})
-        gc_uid    = gs.get("userId", "")
-        name      = profile.get("name", {}).get("fullName", "Unknown Student")
-        email     = profile.get("emailAddress", f"{gc_uid}@classroom.google.com")
+        profile = gs.get("profile", {})
+        gc_uid  = gs.get("userId", "")
+        name    = profile.get("name", {}).get("fullName", "Unknown Student")
+        email   = profile.get("emailAddress", f"{gc_uid}@classroom.google.com")
 
         if not gc_uid:
             continue
 
         # Check if already linked
-        token_row = db.query(models.StudentGoogleToken).filter_by(
-            gc_user_id=gc_uid
-        ).first()
-
+        token_row = db.query(models.StudentGoogleToken).filter_by(gc_user_id=gc_uid).first()
         if token_row:
             gc_id_to_local[gc_uid] = token_row.student_id
             continue
@@ -124,25 +200,20 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
         if existing_user:
             student_id = existing_user.id
         else:
-            # Create new student account
+            # Insert via raw SQL to bypass PostgreSQL ENUM compile error
             random_password = secrets.token_urlsafe(16)
-            hashed          = pwd_context.hash(random_password)
-            new_user = models.User(
-                name     = name,
-                email    = email,
-                password = hashed,
-                role     = "student",
+            hashed = pwd_context.hash(random_password)
+            db.execute(
+                text("INSERT INTO users (name, email, password, role) VALUES (:name, :email, :password, 'student')"),
+                {"name": name, "email": email, "password": hashed}
             )
-            db.add(new_user)
-            db.flush()  # get the id
+            db.flush()
+            new_user = db.query(models.User).filter_by(email=email).first()
             student_id = new_user.id
             print(f"✅ Created student account: {name} ({email})")
 
         # Link gc_user_id to local student
-        existing_token = db.query(models.StudentGoogleToken).filter_by(
-            student_id=student_id
-        ).first()
-
+        existing_token = db.query(models.StudentGoogleToken).filter_by(student_id=student_id).first()
         if not existing_token:
             db.add(models.StudentGoogleToken(
                 student_id    = student_id,
@@ -156,9 +227,6 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
     db.commit()
     print(f"✅ Synced {len(gc_id_to_local)} students to local DB")
     return gc_id_to_local
-
-
-
 
 
 
