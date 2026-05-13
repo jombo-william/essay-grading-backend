@@ -1,4 +1,8 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
+
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -11,9 +15,9 @@ class User(Base):
     name                = Column(String(100), nullable=False)
     email               = Column(String(150), unique=True, nullable=False)
     password            = Column(String(255), nullable=False)
-
-    role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
-
+    #role                = Column(Enum("teacher", "student"), nullable=False)
+    role = Column(String(20), nullable=False)
+    #role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
     registration_number = Column(String(50), nullable=True)
     phone               = Column(String(20), nullable=True)
     is_active           = Column(Boolean, default=True)
@@ -139,36 +143,40 @@ class AssignmentAttachment(Base):
 class Submission(Base):
     __tablename__ = "submissions"
 
-    id            = Column(Integer, primary_key=True, index=True)
-    assignment_id = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
-    student_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-
-    essay_text    = Column(Text, nullable=False)
-
-    submit_mode = Column(
-        Enum("write", "upload", name="submission_mode_enum"),
-        default="write"
-    )
-
-    file_name = Column(String(255), nullable=True)
-    file_path = Column(String(500), nullable=True)
-
+    id                 = Column(Integer, primary_key=True, index=True)
+    assignment_id      = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
+    student_id         = Column(Integer, ForeignKey("users.id",       ondelete="CASCADE"), nullable=False)
+    essay_text         = Column(Text, nullable=False)
+    submit_mode = Column(String(20), default="write")
+    #submit_mode        = Column(Enum("write", "upload"), default="write")
+    file_name          = Column(String(255), nullable=True)
+    file_path          = Column(String(500), nullable=True)
     ai_score           = Column(Integer, nullable=True)
     ai_feedback        = Column(Text, nullable=True)
     ai_detection_score = Column(Integer, nullable=True)
     ai_graded_at       = Column(TIMESTAMP, nullable=True)
+    final_score        = Column(Integer, nullable=True)
+    teacher_feedback   = Column(Text, nullable=True)
+    graded_at          = Column(TIMESTAMP, nullable=True)
+    status = Column(String(20), default="pending")
+    #status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
+    submitted_at       = Column(TIMESTAMP, server_default=func.now())
+    updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    # In models.py add these two columns to your Assignment model
+    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_course_id     = Column(Integer, nullable=True)
 
-    final_score      = Column(Integer, nullable=True)
-    teacher_feedback = Column(Text, nullable=True)
-    graded_at        = Column(TIMESTAMP, nullable=True)
+    # final_score      = Column(Integer, nullable=True)
+    # teacher_feedback = Column(Text, nullable=True)
+    # graded_at        = Column(TIMESTAMP, nullable=True)
 
-    status = Column(
-        Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
-        default="pending"
-    )
+    # status = Column(
+    #     Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
+    #     default="pending"
+    # )
 
-    submitted_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    # submitted_at = Column(TIMESTAMP, server_default=func.now())
+    # updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     assignment   = relationship("Assignment", back_populates="submissions")
     student      = relationship("User", back_populates="submissions")
@@ -305,15 +313,10 @@ class Exam(Base):
 class ExamQuestion(Base):
     __tablename__ = "exam_questions"
 
-    id      = Column(Integer, primary_key=True, index=True)
-
-    exam_id = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
-
-    type = Column(
-        Enum("mcq", "structured", name="exam_question_type_enum"),
-        nullable=False
-    )
-
+    id             = Column(Integer, primary_key=True, index=True)
+    exam_id        = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
+    type = Column(String(20), nullable=False)
+    #type           = Column(Enum("mcq", "structured"), nullable=False)
     prompt         = Column(Text, nullable=False)
     marks          = Column(Integer, default=1)
     options        = Column(Text, nullable=True)
@@ -329,15 +332,11 @@ class ExamQuestion(Base):
 class ExamSubmission(Base):
     __tablename__ = "exam_submissions"
 
-    id         = Column(Integer, primary_key=True, index=True)
-    exam_id    = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
-    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-
-    status = Column(
-        Enum("submitted", "graded", name="exam_submission_status_enum"),
-        default="submitted"
-    )
-
+    id           = Column(Integer, primary_key=True, index=True)
+    exam_id      = Column(Integer, ForeignKey("exams.id",  ondelete="CASCADE"), nullable=False)
+    student_id   = Column(Integer, ForeignKey("users.id",  ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), default="submitted")
+    #status       = Column(Enum("submitted", "graded"), default="submitted")
     total_score  = Column(Integer, nullable=True)
     submitted_at = Column(TIMESTAMP, server_default=func.now())
     graded_at    = Column(TIMESTAMP, nullable=True)
