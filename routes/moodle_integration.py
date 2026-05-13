@@ -1,6 +1,778 @@
 
 
 
+# from re import sub
+
+# import requests
+# from fastapi import APIRouter, Depends, HTTPException
+# from pydantic import BaseModel
+# from typing import Optional
+# from auth_utils import require_teacher
+# import models
+# import json
+# import asyncio
+# import time
+# import random
+
+
+# router = APIRouter()
+
+# DEFAULT_MOODLE_URL = "https://essaygrade.moodlecloud.com"
+
+
+# def moodle_call(token: str, function: str, params: dict, site_url: str = DEFAULT_MOODLE_URL):
+#     """Make a Moodle Web Service call."""
+#     # Strip trailing slash
+#     site_url = site_url.rstrip("/")
+#     try:
+#         response = requests.post(
+#             f"{site_url}/webservice/rest/server.php",
+#             data={
+#                 "wstoken":            token,
+#                 "wsfunction":         function,
+#                 "moodlewsrestformat": "json",
+#                 **params
+#             },
+#             timeout=30
+#         )
+#         data = response.json()
+#         if isinstance(data, dict) and data.get("exception"):
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail=f"Moodle error: {data.get('message', 'Unknown error')}"
+#             )
+#         return data
+#     except requests.exceptions.ConnectionError:
+#         raise HTTPException(
+#             status_code=503,
+#             detail=f"Cannot connect to Moodle at {site_url}"
+#         )
+
+
+# # ── GET /api/teacher/moodle/courses ──────────────────────────────────────
+# @router.get("/moodle/courses")
+# def get_moodle_courses(
+#     moodle_token: str,
+#     site_url: str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token     = moodle_token,
+#         function  = "core_enrol_get_users_courses",
+#         params    = {"userid": "2"},
+#         site_url  = site_url
+#     )
+#     return {"success": True, "courses": data}
+
+
+# # ── GET /api/teacher/moodle/assignments ──────────────────────────────────
+# @router.get("/moodle/assignments")
+# def get_moodle_assignments(
+#     moodle_token: str,
+#     course_id:    int,
+#     site_url:     str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "mod_assign_get_assignments",
+#         params   = {"courseids[0]": course_id},
+#         site_url = site_url
+#     )
+#     return {"success": True, "data": data}
+
+
+# # ── GET /api/teacher/moodle/submissions ──────────────────────────────────
+# @router.get("/moodle/submissions")
+# def get_moodle_submissions(
+#     moodle_token:  str,
+#     assignment_id: int,
+#     site_url:      str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "mod_assign_get_submissions",
+#         params   = {"assignmentids[0]": assignment_id},
+#         site_url = site_url
+#     )
+#     return {"success": True, "data": data}
+
+
+# # ── POST /api/teacher/moodle/autograde ───────────────────────────────────
+# class MoodleAutoGradeRequest(BaseModel):
+#     moodle_token:         str
+#     moodle_assignment_id: int
+#     local_assignment_id:  int
+#     site_url:             str = DEFAULT_MOODLE_URL
+
+
+# @router.post("/moodle/autograde-quiz")
+# async def autograde_moodle_quiz(
+#     body: MoodleQuizGradeRequest,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     from services.grader import grade_essay
+
+#     user = ctx["user"]
+#     db   = ctx["db"]
+
+#     assignment = db.query(models.Assignment).filter(
+#         models.Assignment.id         == body.local_assignment_id,
+#         models.Assignment.teacher_id == user.id,
+#     ).first()
+#     if not assignment:
+#         raise HTTPException(status_code=404, detail="Local assignment not found")
+
+#     # Step 1: Get all enrolled users in the course
+#     enrolled = moodle_call(
+#         token    = body.moodle_token,
+#         function = "core_enrol_get_enrolled_users",
+#         params   = {"courseid": body.course_id},  # <-- need course_id in request
+#         site_url = body.site_url
+#     )
+
+#     results = []
+
+#     for moodle_user in enrolled:
+#         userid = moodle_user.get("id")
+#         if userid in [1, 2]:  # skip admin/guest
+#             continue
+
+#         # Step 2: Get THIS user's attempts for the quiz
+#         attempts_data = moodle_call(
+#             token    = body.moodle_token,
+#             function = "mod_quiz_get_user_attempts",
+#             params   = {
+#                 "quizid":          body.quiz_id,
+#                 "userid":          userid,          # KEY FIX: specify the user
+#                 "status":          "finished",
+#                 "includepreviews": 0
+#             },
+#             site_url = body.site_url
+#         )
+
+#         attempts = attempts_data.get("attempts", [])
+#         if not attempts:
+#             continue
+
+#         # Take the latest finished attempt
+#         attempt = attempts[-1]
+#         attempt_id = attempt.get("id")
+
+#         # Step 3: Use attempt REVIEW to get essay answers (teacher can access this)
+#         try:
+#             review_data = moodle_call(
+#                 token    = body.moodle_token,
+#                 function = "mod_quiz_get_attempt_review",
+#                 params   = {"attemptid": attempt_id, "page": -1},
+#                 site_url = body.site_url
+#             )
+#         except Exception as e:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": f"Could not fetch attempt review: {str(e)}",
+#                 "status": "failed"
+#             })
+#             continue
+
+#         # Step 4: Extract essay text from questions
+#         essay_parts = []
+#         for question in review_data.get("questions", []):
+#             qtype = question.get("type", "")
+#             if qtype != "essay":
+#                 continue
+
+#             # Essay answer is in the html rendered response
+#             response_html = question.get("responsefileareas", "")
+#             # Better: parse from questionsummary plain text
+#             summary = question.get("questionsummary", "")
+#             answer  = question.get("responsesummary", "")  # THIS is the actual answer
+#             if answer:
+#                 essay_parts.append(answer)
+
+#         essay_text = "\n\n".join(essay_parts).strip()
+
+#         if not essay_text:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": "No essay answer found in attempt",
+#                 "status": "skipped"
+#             })
+#             continue
+
+#         # Step 5: Grade
+#         rubric = None
+#         if assignment.rubric:
+#             try:
+#                 rubric = json.loads(assignment.rubric)
+#             except:
+#                 pass
+
+#         grade = None
+#         last_error = None
+#         for attempt_num in range(4):
+#             try:
+#                 grade = grade_essay(essay_text, rubric)
+#                 break
+#             except Exception as retry_err:
+#                 last_error = retry_err
+#                 error_str = str(retry_err)
+#                 if "429" in error_str:
+#                     wait = 15 * (attempt_num + 1)
+#                     print(f"Rate limited, waiting {wait}s...")
+#                     time.sleep(wait)
+#                 elif "503" in error_str and attempt_num < 3:
+#                     time.sleep(2 ** attempt_num)
+#                 else:
+#                     break
+
+#         if grade is None:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": str(last_error) if last_error else "Grading failed",
+#                 "status": "failed"
+#             })
+#             continue
+
+#         results.append({
+#             "moodle_user_id": userid,
+#             "attempt_id":     attempt_id,
+#             "score":          grade.get("total_score", grade.get("score", 0)),
+#             "feedback":       grade.get("overall_feedback", grade.get("feedback", "")),
+#             "status":         "graded"
+#         })
+
+#         await asyncio.sleep(1)  # rate limit buffer
+
+#     return {
+#         "success":      True,
+#         "total_graded": len([r for r in results if r["status"] == "graded"]),
+#         "results":      results
+#     }
+
+
+# # @router.post("/moodle/autograde")
+# # async def autograde_moodle(
+# #     body: MoodleAutoGradeRequest,
+# #     ctx: dict = Depends(require_teacher)
+# # ):
+# #     from services.grader import grade_essay
+
+# #     user = ctx["user"]
+# #     db   = ctx["db"]
+
+# #     assignment = db.query(models.Assignment).filter(
+# #         models.Assignment.id         == body.local_assignment_id,
+# #         models.Assignment.teacher_id == user.id,
+# #     ).first()
+
+# #     if not assignment:
+# #         raise HTTPException(status_code=404, detail="Local assignment not found")
+
+# #     subs_data = moodle_call(
+# #         token    = body.moodle_token,
+# #         function = "mod_assign_get_submissions",
+# #         params   = {"assignmentids[0]": body.moodle_assignment_id},
+# #         site_url = body.site_url
+# #     )
+
+# #     results = []
+
+# #     for assign in subs_data.get("assignments", []):
+# #         for sub in assign.get("submissions", []):
+
+# #             if sub.get("status") != "submitted":
+# #                 continue
+
+# #             essay_text = ""
+# #             for plugin in sub.get("plugins", []):
+# #                 if plugin.get("type") == "onlinetext":
+# #                     for field in plugin.get("editorfields", []):
+# #                         essay_text += field.get("text", "")
+
+# #             if not essay_text.strip():
+# #                 continue
+
+# #             rubric = None
+# #             if assignment.rubric:
+# #                 try:
+# #                     rubric = json.loads(assignment.rubric)
+# #                 except:
+# #                     rubric = None
+
+# #             # try:
+# #             #     grade = grade_essay(essay_text, rubric)
+# #             await asyncio.sleep(1)  # delay between students to avoid rate limits
+            
+# #             # last_error = None
+# #             # grade = None
+# #             # for attempt in range(3):  # retry up to 3 times
+# #             #     try:
+# #             #         grade = grade_essay(essay_text, rubric)
+# #             #         break
+# #             #     except Exception as retry_err:
+# #             #         last_error = retry_err
+# #             #         if attempt < 2:
+# #             #             time.sleep(2 ** attempt + random.uniform(0, 1))
+            
+# #             # if grade is None:
+# #             #     raise last_error
+            
+# #             last_error = None
+# #             grade = None
+# #             for attempt in range(4):  # 4 attempts
+# #                 try:
+# #                     grade = grade_essay(essay_text, rubric)
+# #                     break
+# #                 except Exception as retry_err:
+# #                     last_error = retry_err
+# #                     error_str = str(retry_err)
+# #                     if "429" in error_str:
+# #                         wait = 15 * (attempt + 1)  # 15s, 30s, 45s, 60s
+# #                         print(f"Rate limited, waiting {wait}s before retry {attempt+1}...")
+# #                         time.sleep(wait)
+# #                     elif "503" in error_str and attempt < 3:
+# #                         time.sleep(2 ** attempt)
+# #                     else:
+# #                         break  # don't retry other errors
+
+# #             if grade is None:
+# #                 error_msg = str(last_error) if last_error else "Unknown grading error"
+# #                 if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
+# #                     error_msg = "AI grading service temporarily unavailable (503). Please retry."
+# #                 results.append({
+# #                     "moodle_user_id": sub["userid"],
+# #                     "error": error_msg,
+# #                     "status": "failed"
+# #                 })
+# #                 continue
+
+# #             try:
+# #                 feedback_text = grade.get("overall_feedback", grade.get("feedback", ""))
+# #                 moodle_call(
+# #                     token    = body.moodle_token,
+# #                     function = "mod_assign_save_grade",
+# #                     params   = {
+# #                         "assignmentid":                                       body.moodle_assignment_id,
+# #                         "userid":                                             sub["userid"],
+# #                         "grade":                                              float(grade.get("total_score", grade.get("score", 0))),
+# #                         "attemptnumber":                                      -1,
+# #                         "addattempt":                                         0,
+# #                         "workflowstate":                                      "graded",   # "released" can fail on some Moodle versions
+# #                         "applytoall":                                         1,
+# #                         "plugindata[assignfeedbackcomments_editor][text]":    feedback_text,
+# #                         "plugindata[assignfeedbackcomments_editor][format]":  1,
+# #                     },
+# #                     site_url = body.site_url
+# #                 )
+
+# #                 results.append({
+# #                     "moodle_user_id": sub["userid"],
+# #                     "score":  grade.get("total_score", grade.get("score", 0)),  # handles both grader.py versions
+# #                     "status": "graded"
+# #                 })
+# #             except Exception as e:
+# #                 error_msg = str(e)
+# #                 if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
+# #                     error_msg = "AI grading service temporarily unavailable (503). Please retry."
+# #                 results.append({
+# #                     "moodle_user_id": sub["userid"],
+# #                     "error":  error_msg,
+# #                     "status": "failed"
+# #                 })
+
+# #     return {
+# #         "success":      True,
+# #         "total_graded": len(results),
+# #         "results":      results
+# #     }
+
+
+# # ── POST /api/teacher/moodle/sync-students ───────────────────────────────
+# @router.post("/moodle/sync-students")
+# def sync_moodle_students(
+#     moodle_token:   str,
+#     course_id:      int,
+#     local_class_id: int,
+#     site_url:       str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     db = ctx["db"]
+
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "core_enrol_get_enrolled_users",
+#         params   = {"courseid": course_id},
+#         site_url = site_url
+#     )
+
+#     synced = []
+#     for moodle_user in data:
+#         if moodle_user.get("id") in [1, 2]:
+#             continue
+
+#         existing = db.query(models.Student).filter(
+#             models.Student.email == moodle_user.get("email", "")
+#         ).first()
+
+#         if not existing:
+#             student = models.Student(
+#                 name          = moodle_user.get("fullname", ""),
+#                 email         = moodle_user.get("email", ""),
+#                 class_id      = local_class_id,
+#                 moodle_user_id= moodle_user.get("id")
+#             )
+#             db.add(student)
+#             synced.append(moodle_user.get("fullname"))
+
+#     db.commit()
+#     return {"success": True, "synced": synced}
+
+
+# #── GET /api/teacher/moodle/quizzes ──────────────────────────────────────
+# @router.get("/moodle/quizzes")
+# def get_moodle_quizzes(
+#     moodle_token: str,
+#     course_id:    int,
+#     site_url:     str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "mod_quiz_get_quizzes_by_courses",
+#         params   = {"courseids[0]": course_id},
+#         site_url = site_url
+#     )
+#     return {"success": True, "quizzes": data.get("quizzes", [])}
+
+
+# #── GET /api/teacher/moodle/quiz-attempts ────────────────────────────────
+# @router.get("/moodle/quiz-attempts")
+# def get_quiz_attempts(
+#     moodle_token: str,
+#     quiz_id:      int,
+#     site_url:     str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "mod_quiz_get_user_attempts",
+#         params   = {
+#             "quizid":          quiz_id,
+#             "status":          "finished",
+#             "includepreviews": 0
+#         },
+#         site_url = site_url
+#     )
+#     return {"success": True, "attempts": data.get("attempts", [])}
+
+
+# #── POST /api/teacher/moodle/autograde-quiz ──────────────────────────────
+# class MoodleQuizGradeRequest(BaseModel):
+#     moodle_token:        str
+#     quiz_id:             int
+#     course_id:           int 
+#     local_assignment_id: int
+#     site_url:            str = DEFAULT_MOODLE_URL
+
+
+# @router.post("/moodle/autograde-quiz")
+# async def autograde_moodle_quiz(
+#     body: MoodleQuizGradeRequest,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     from services.grader import grade_essay
+
+#     user = ctx["user"]
+#     db   = ctx["db"]
+
+#     assignment = db.query(models.Assignment).filter(
+#         models.Assignment.id         == body.local_assignment_id,
+#         models.Assignment.teacher_id == user.id,
+#     ).first()
+#     if not assignment:
+#         raise HTTPException(status_code=404, detail="Local assignment not found")
+
+#     # Step 1: Get all enrolled users in the course
+#     enrolled = moodle_call(
+#         token    = body.moodle_token,
+#         function = "core_enrol_get_enrolled_users",
+#         params   = {"courseid": body.course_id},  # <-- need course_id in request
+#         site_url = body.site_url
+#     )
+
+#     results = []
+
+#     for moodle_user in enrolled:
+#         userid = moodle_user.get("id")
+#         if userid in [1, 2]:  # skip admin/guest
+#             continue
+
+#         # Step 2: Get THIS user's attempts for the quiz
+#         attempts_data = moodle_call(
+#             token    = body.moodle_token,
+#             function = "mod_quiz_get_user_attempts",
+#             params   = {
+#                 "quizid":          body.quiz_id,
+#                 "userid":          userid,          # KEY FIX: specify the user
+#                 "status":          "finished",
+#                 "includepreviews": 0
+#             },
+#             site_url = body.site_url
+#         )
+
+#         attempts = attempts_data.get("attempts", [])
+#         if not attempts:
+#             continue
+
+#         # Take the latest finished attempt
+#         attempt = attempts[-1]
+#         attempt_id = attempt.get("id")
+
+#         # Step 3: Use attempt REVIEW to get essay answers (teacher can access this)
+#         try:
+#             review_data = moodle_call(
+#                 token    = body.moodle_token,
+#                 function = "mod_quiz_get_attempt_review",
+#                 params   = {"attemptid": attempt_id, "page": -1},
+#                 site_url = body.site_url
+#             )
+#         except Exception as e:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": f"Could not fetch attempt review: {str(e)}",
+#                 "status": "failed"
+#             })
+#             continue
+
+#         # Step 4: Extract essay text from questions
+#         essay_parts = []
+#         for question in review_data.get("questions", []):
+#             qtype = question.get("type", "")
+#             if qtype != "essay":
+#                 continue
+
+#             # Essay answer is in the html rendered response
+#             response_html = question.get("responsefileareas", "")
+#             # Better: parse from questionsummary plain text
+#             summary = question.get("questionsummary", "")
+#             answer  = question.get("responsesummary", "")  # THIS is the actual answer
+#             if answer:
+#                 essay_parts.append(answer)
+
+#         essay_text = "\n\n".join(essay_parts).strip()
+
+#         if not essay_text:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": "No essay answer found in attempt",
+#                 "status": "skipped"
+#             })
+#             continue
+
+#         # Step 5: Grade
+#         rubric = None
+#         if assignment.rubric:
+#             try:
+#                 rubric = json.loads(assignment.rubric)
+#             except:
+#                 pass
+
+#         grade = None
+#         last_error = None
+#         for attempt_num in range(4):
+#             try:
+#                 grade = grade_essay(essay_text, rubric)
+#                 break
+#             except Exception as retry_err:
+#                 last_error = retry_err
+#                 error_str = str(retry_err)
+#                 if "429" in error_str:
+#                     wait = 15 * (attempt_num + 1)
+#                     print(f"Rate limited, waiting {wait}s...")
+#                     time.sleep(wait)
+#                 elif "503" in error_str and attempt_num < 3:
+#                     time.sleep(2 ** attempt_num)
+#                 else:
+#                     break
+
+#         if grade is None:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error": str(last_error) if last_error else "Grading failed",
+#                 "status": "failed"
+#             })
+#             continue
+
+#         results.append({
+#             "moodle_user_id": userid,
+#             "attempt_id":     attempt_id,
+#             "score":          grade.get("total_score", grade.get("score", 0)),
+#             "feedback":       grade.get("overall_feedback", grade.get("feedback", "")),
+#             "status":         "graded"
+#         })
+
+#         await asyncio.sleep(1)  # rate limit buffer
+
+#     return {
+#         "success":      True,
+#         "total_graded": len([r for r in results if r["status"] == "graded"]),
+#         "results":      results
+#     }
+
+
+# # @router.post("/moodle/autograde-quiz")
+# # async def autograde_moodle_quiz(
+# #     body: MoodleQuizGradeRequest,
+# #     ctx: dict = Depends(require_teacher)
+# # ):
+# #     from services.grader import grade_essay
+
+# #     user = ctx["user"]
+# #     db   = ctx["db"]
+
+# #     assignment = db.query(models.Assignment).filter(
+# #         models.Assignment.id         == body.local_assignment_id,
+# #         models.Assignment.teacher_id == user.id,
+# #     ).first()
+
+# #     if not assignment:
+# #         raise HTTPException(status_code=404, detail="Local assignment not found")
+
+# #     attempts_data = moodle_call(
+# #         token    = body.moodle_token,
+# #         function = "mod_quiz_get_user_attempts",
+# #         params   = {
+# #             "quizid":          body.quiz_id,
+# #             "status":          "finished",
+# #             "includepreviews": 0
+# #         },
+# #         site_url = body.site_url
+# #     )
+
+# #     results = []
+
+# #     for attempt in attempts_data.get("attempts", []):
+# #         attempt_id = attempt.get("id")
+# #         userid     = attempt.get("userid")
+
+# #         attempt_data = moodle_call(
+# #             token    = body.moodle_token,
+# #             function = "mod_quiz_get_attempt_data",
+# #             params   = {"attemptid": attempt_id, "page": -1},
+# #             site_url = body.site_url
+# #         )
+
+# #         essay_text = ""
+# #         for question in attempt_data.get("questions", []):
+# #             if question.get("type") == "essay":
+# #                 essay_text += question.get("responsefileareas", "")
+# #                 for key, val in question.get("questionsummary", {}).items():
+# #                     if "answer" in key.lower():
+# #                         essay_text += str(val)
+
+# #         if not essay_text.strip():
+# #             continue
+
+# #         try:
+# #             rubric = json.loads(assignment.rubric) if assignment.rubric else None
+# #             grade  = grade_essay(essay_text, rubric)
+
+# #             results.append({
+# #                 "moodle_user_id": userid,
+# #                 "attempt_id":     attempt_id,
+# #                 "score":          grade.get("score", 0),
+# #                 "feedback":       grade.get("feedback", ""),
+# #                 "status":         "graded"
+# #             })
+
+# #         except Exception as e:
+# #             results.append({
+# #                 "moodle_user_id": userid,
+# #                 "error":          str(e),
+# #                 "status":         "failed"
+# #             })
+
+# #     return {
+# #         "success":      True,
+# #         "total_graded": len(results),
+# #         "results":      results
+# #     }
+
+
+# # ── POST /api/teacher/moodle/create-assignment ───────────────────────────
+# class MoodleCreateAssignmentRequest(BaseModel):
+#     moodle_token:        str
+#     course_id:           int
+#     name:                str
+#     instructions:        str
+#     due_date:            Optional[int] = None
+#     max_grade:           Optional[int] = 100
+#     local_assignment_id: int
+#     site_url:            str = DEFAULT_MOODLE_URL
+
+
+# @router.post("/moodle/create-assignment")
+# def create_moodle_assignment(
+#     body: MoodleCreateAssignmentRequest,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     db   = ctx["db"]
+#     user = ctx["user"]
+
+#     sections = moodle_call(
+#         token    = body.moodle_token,
+#         function = "core_course_get_contents",
+#         params   = {"courseid": body.course_id},
+#         site_url = body.site_url
+#     )
+#     section_id = sections[0]["id"] if sections else 0
+
+#     result = moodle_call(
+#         token    = body.moodle_token,
+#         function = "mod_assign_add_instance",
+#         params   = {
+#             "courseid":                            body.course_id,
+#             "name":                                body.name,
+#             "intro":                               body.instructions,
+#             "introformat":                         1,
+#             "section":                             section_id,
+#             "duedate":                             body.due_date or 0,
+#             "grade":                               body.max_grade,
+#             "submissiondrafts":                    0,
+#             "assignsubmission_onlinetext_enabled": 1,
+#             "assignsubmission_file_enabled":       0,
+#         },
+#         site_url = body.site_url
+#     )
+
+#     moodle_assignment_id = result.get("assignmentid") or result
+
+#     assignment = db.query(models.Assignment).filter(
+#         models.Assignment.id         == body.local_assignment_id,
+#         models.Assignment.teacher_id == user.id,
+#     ).first()
+
+#     if assignment:
+#         assignment.moodle_assignment_id = moodle_assignment_id
+#         assignment.moodle_course_id     = body.course_id
+#         db.commit()
+
+#     return {
+#         "success":              True,
+#         "moodle_assignment_id": moodle_assignment_id,
+#         "message":              "Assignment created in Moodle successfully"
+#     }
+
+
+
+
+
+
+
+
+
 from re import sub
 
 import requests
@@ -14,15 +786,12 @@ import asyncio
 import time
 import random
 
-
 router = APIRouter()
 
 DEFAULT_MOODLE_URL = "https://essaygrade.moodlecloud.com"
 
 
 def moodle_call(token: str, function: str, params: dict, site_url: str = DEFAULT_MOODLE_URL):
-    """Make a Moodle Web Service call."""
-    # Strip trailing slash
     site_url = site_url.rstrip("/")
     try:
         response = requests.post(
@@ -57,10 +826,10 @@ def get_moodle_courses(
     ctx: dict = Depends(require_teacher)
 ):
     data = moodle_call(
-        token     = moodle_token,
-        function  = "core_enrol_get_users_courses",
-        params    = {"userid": "2"},
-        site_url  = site_url
+        token    = moodle_token,
+        function = "core_enrol_get_users_courses",
+        params   = {"userid": "2"},
+        site_url = site_url
     )
     return {"success": True, "courses": data}
 
@@ -99,7 +868,46 @@ def get_moodle_submissions(
     return {"success": True, "data": data}
 
 
-# ── POST /api/teacher/moodle/autograde ───────────────────────────────────
+# ── GET /api/teacher/moodle/quizzes ──────────────────────────────────────
+@router.get("/moodle/quizzes")
+def get_moodle_quizzes(
+    moodle_token: str,
+    course_id:    int,
+    site_url:     str = DEFAULT_MOODLE_URL,
+    ctx: dict = Depends(require_teacher)
+):
+    data = moodle_call(
+        token    = moodle_token,
+        function = "mod_quiz_get_quizzes_by_courses",
+        params   = {"courseids[0]": course_id},
+        site_url = site_url
+    )
+    return {"success": True, "quizzes": data.get("quizzes", [])}
+
+
+# ── GET /api/teacher/moodle/quiz-attempts ────────────────────────────────
+@router.get("/moodle/quiz-attempts")
+def get_quiz_attempts(
+    moodle_token: str,
+    quiz_id:      int,
+    site_url:     str = DEFAULT_MOODLE_URL,
+    ctx: dict = Depends(require_teacher)
+):
+    data = moodle_call(
+        token    = moodle_token,
+        function = "mod_quiz_get_user_attempts",
+        params   = {
+            "quizid":          quiz_id,
+            "status":          "finished",
+            "includepreviews": 0
+        },
+        site_url = site_url
+    )
+    return {"success": True, "attempts": data.get("attempts", [])}
+
+
+# ── ALL Pydantic models together — BEFORE the POST routes ────────────────
+
 class MoodleAutoGradeRequest(BaseModel):
     moodle_token:         str
     moodle_assignment_id: int
@@ -107,6 +915,26 @@ class MoodleAutoGradeRequest(BaseModel):
     site_url:             str = DEFAULT_MOODLE_URL
 
 
+class MoodleQuizGradeRequest(BaseModel):
+    moodle_token:        str
+    quiz_id:             int
+    course_id:           int
+    local_assignment_id: int
+    site_url:            str = DEFAULT_MOODLE_URL
+
+
+class MoodleCreateAssignmentRequest(BaseModel):
+    moodle_token:        str
+    course_id:           int
+    name:                str
+    instructions:        str
+    due_date:            Optional[int] = None
+    max_grade:           Optional[int] = 100
+    local_assignment_id: int
+    site_url:            str = DEFAULT_MOODLE_URL
+
+
+# ── POST /api/teacher/moodle/autograde ───────────────────────────────────
 @router.post("/moodle/autograde")
 async def autograde_moodle(
     body: MoodleAutoGradeRequest,
@@ -121,7 +949,6 @@ async def autograde_moodle(
         models.Assignment.id         == body.local_assignment_id,
         models.Assignment.teacher_id == user.id,
     ).first()
-
     if not assignment:
         raise HTTPException(status_code=404, detail="Local assignment not found")
 
@@ -136,7 +963,6 @@ async def autograde_moodle(
 
     for assign in subs_data.get("assignments", []):
         for sub in assign.get("submissions", []):
-
             if sub.get("status") != "submitted":
                 continue
 
@@ -156,27 +982,11 @@ async def autograde_moodle(
                 except:
                     rubric = None
 
-            # try:
-            #     grade = grade_essay(essay_text, rubric)
-            await asyncio.sleep(1)  # delay between students to avoid rate limits
-            
-            # last_error = None
-            # grade = None
-            # for attempt in range(3):  # retry up to 3 times
-            #     try:
-            #         grade = grade_essay(essay_text, rubric)
-            #         break
-            #     except Exception as retry_err:
-            #         last_error = retry_err
-            #         if attempt < 2:
-            #             time.sleep(2 ** attempt + random.uniform(0, 1))
-            
-            # if grade is None:
-            #     raise last_error
-            
+            await asyncio.sleep(1)
+
             last_error = None
             grade = None
-            for attempt in range(4):  # 4 attempts
+            for attempt in range(4):
                 try:
                     grade = grade_essay(essay_text, rubric)
                     break
@@ -184,13 +994,13 @@ async def autograde_moodle(
                     last_error = retry_err
                     error_str = str(retry_err)
                     if "429" in error_str:
-                        wait = 15 * (attempt + 1)  # 15s, 30s, 45s, 60s
+                        wait = 15 * (attempt + 1)
                         print(f"Rate limited, waiting {wait}s before retry {attempt+1}...")
                         time.sleep(wait)
                     elif "503" in error_str and attempt < 3:
                         time.sleep(2 ** attempt)
                     else:
-                        break  # don't retry other errors
+                        break
 
             if grade is None:
                 error_msg = str(last_error) if last_error else "Unknown grading error"
@@ -209,22 +1019,21 @@ async def autograde_moodle(
                     token    = body.moodle_token,
                     function = "mod_assign_save_grade",
                     params   = {
-                        "assignmentid":                                       body.moodle_assignment_id,
-                        "userid":                                             sub["userid"],
-                        "grade":                                              float(grade.get("total_score", grade.get("score", 0))),
-                        "attemptnumber":                                      -1,
-                        "addattempt":                                         0,
-                        "workflowstate":                                      "graded",   # "released" can fail on some Moodle versions
-                        "applytoall":                                         1,
-                        "plugindata[assignfeedbackcomments_editor][text]":    feedback_text,
-                        "plugindata[assignfeedbackcomments_editor][format]":  1,
+                        "assignmentid":                                      body.moodle_assignment_id,
+                        "userid":                                            sub["userid"],
+                        "grade":                                             float(grade.get("total_score", grade.get("score", 0))),
+                        "attemptnumber":                                     -1,
+                        "addattempt":                                        0,
+                        "workflowstate":                                     "graded",
+                        "applytoall":                                        1,
+                        "plugindata[assignfeedbackcomments_editor][text]":   feedback_text,
+                        "plugindata[assignfeedbackcomments_editor][format]": 1,
                     },
                     site_url = body.site_url
                 )
-
                 results.append({
                     "moodle_user_id": sub["userid"],
-                    "score":  grade.get("total_score", grade.get("score", 0)),  # handles both grader.py versions
+                    "score":  grade.get("total_score", grade.get("score", 0)),
                     "status": "graded"
                 })
             except Exception as e:
@@ -240,6 +1049,145 @@ async def autograde_moodle(
     return {
         "success":      True,
         "total_graded": len(results),
+        "results":      results
+    }
+
+
+# ── POST /api/teacher/moodle/autograde-quiz ──────────────────────────────
+@router.post("/moodle/autograde-quiz")
+async def autograde_moodle_quiz(
+    body: MoodleQuizGradeRequest,
+    ctx: dict = Depends(require_teacher)
+):
+    from services.grader import grade_essay
+
+    user = ctx["user"]
+    db   = ctx["db"]
+
+    assignment = db.query(models.Assignment).filter(
+        models.Assignment.id         == body.local_assignment_id,
+        models.Assignment.teacher_id == user.id,
+    ).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Local assignment not found")
+
+    # Step 1: Get all enrolled users in the course
+    enrolled = moodle_call(
+        token    = body.moodle_token,
+        function = "core_enrol_get_enrolled_users",
+        params   = {"courseid": body.course_id},
+        site_url = body.site_url
+    )
+
+    results = []
+
+    for moodle_user in enrolled:
+        userid = moodle_user.get("id")
+        if userid in [1, 2]:  # skip admin/guest
+            continue
+
+        # Step 2: Get THIS user's attempts for the quiz
+        attempts_data = moodle_call(
+            token    = body.moodle_token,
+            function = "mod_quiz_get_user_attempts",
+            params   = {
+                "quizid":          body.quiz_id,
+                "userid":          userid,
+                "status":          "finished",
+                "includepreviews": 0
+            },
+            site_url = body.site_url
+        )
+
+        attempts = attempts_data.get("attempts", [])
+        if not attempts:
+            continue
+
+        attempt    = attempts[-1]
+        attempt_id = attempt.get("id")
+
+        # Step 3: Fetch attempt review (teacher-accessible)
+        try:
+            review_data = moodle_call(
+                token    = body.moodle_token,
+                function = "mod_quiz_get_attempt_review",
+                params   = {"attemptid": attempt_id, "page": -1},
+                site_url = body.site_url
+            )
+        except Exception as e:
+            results.append({
+                "moodle_user_id": userid,
+                "error": f"Could not fetch attempt review: {str(e)}",
+                "status": "failed"
+            })
+            continue
+
+        # Step 4: Extract essay answers
+        essay_parts = []
+        for question in review_data.get("questions", []):
+            if question.get("type") != "essay":
+                continue
+            answer = question.get("responsesummary", "")
+            if answer:
+                essay_parts.append(answer)
+
+        essay_text = "\n\n".join(essay_parts).strip()
+
+        if not essay_text:
+            results.append({
+                "moodle_user_id": userid,
+                "error": "No essay answer found in attempt",
+                "status": "skipped"
+            })
+            continue
+
+        # Step 5: Grade with retry
+        rubric = None
+        if assignment.rubric:
+            try:
+                rubric = json.loads(assignment.rubric)
+            except:
+                pass
+
+        grade = None
+        last_error = None
+        for attempt_num in range(4):
+            try:
+                grade = grade_essay(essay_text, rubric)
+                break
+            except Exception as retry_err:
+                last_error = retry_err
+                error_str = str(retry_err)
+                if "429" in error_str:
+                    wait = 15 * (attempt_num + 1)
+                    print(f"Rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                elif "503" in error_str and attempt_num < 3:
+                    time.sleep(2 ** attempt_num)
+                else:
+                    break
+
+        if grade is None:
+            results.append({
+                "moodle_user_id": userid,
+                "error": str(last_error) if last_error else "Grading failed",
+                "status": "failed"
+            })
+            continue
+
+        results.append({
+            "moodle_user_id": userid,
+            "attempt_id":     attempt_id,
+            "score":          grade.get("total_score", grade.get("score", 0)),
+            "feedback":       grade.get("overall_feedback", grade.get("feedback", "")),
+            "status":         "graded"
+        })
+
+        await asyncio.sleep(1)
+
+    return {
+        "success":      True,
+        "total_graded": len([r for r in results if r["status"] == "graded"]),
         "results":      results
     }
 
@@ -266,162 +1214,17 @@ def sync_moodle_students(
     for moodle_user in data:
         if moodle_user.get("id") in [1, 2]:
             continue
-
-        existing = db.query(models.Student).filter(
-            models.Student.email == moodle_user.get("email", "")
+        existing = db.query(models.User).filter(
+            models.User.email == moodle_user.get("email", "")
         ).first()
-
         if not existing:
-            student = models.Student(
-                name          = moodle_user.get("fullname", ""),
-                email         = moodle_user.get("email", ""),
-                class_id      = local_class_id,
-                moodle_user_id= moodle_user.get("id")
-            )
-            db.add(student)
             synced.append(moodle_user.get("fullname"))
 
     db.commit()
     return {"success": True, "synced": synced}
 
 
-#── GET /api/teacher/moodle/quizzes ──────────────────────────────────────
-@router.get("/moodle/quizzes")
-def get_moodle_quizzes(
-    moodle_token: str,
-    course_id:    int,
-    site_url:     str = DEFAULT_MOODLE_URL,
-    ctx: dict = Depends(require_teacher)
-):
-    data = moodle_call(
-        token    = moodle_token,
-        function = "mod_quiz_get_quizzes_by_courses",
-        params   = {"courseids[0]": course_id},
-        site_url = site_url
-    )
-    return {"success": True, "quizzes": data.get("quizzes", [])}
-
-
-#── GET /api/teacher/moodle/quiz-attempts ────────────────────────────────
-@router.get("/moodle/quiz-attempts")
-def get_quiz_attempts(
-    moodle_token: str,
-    quiz_id:      int,
-    site_url:     str = DEFAULT_MOODLE_URL,
-    ctx: dict = Depends(require_teacher)
-):
-    data = moodle_call(
-        token    = moodle_token,
-        function = "mod_quiz_get_user_attempts",
-        params   = {
-            "quizid":          quiz_id,
-            "status":          "finished",
-            "includepreviews": 0
-        },
-        site_url = site_url
-    )
-    return {"success": True, "attempts": data.get("attempts", [])}
-
-
-#── POST /api/teacher/moodle/autograde-quiz ──────────────────────────────
-class MoodleQuizGradeRequest(BaseModel):
-    moodle_token:        str
-    quiz_id:             int
-    local_assignment_id: int
-    site_url:            str = DEFAULT_MOODLE_URL
-
-
-@router.post("/moodle/autograde-quiz")
-async def autograde_moodle_quiz(
-    body: MoodleQuizGradeRequest,
-    ctx: dict = Depends(require_teacher)
-):
-    from services.grader import grade_essay
-
-    user = ctx["user"]
-    db   = ctx["db"]
-
-    assignment = db.query(models.Assignment).filter(
-        models.Assignment.id         == body.local_assignment_id,
-        models.Assignment.teacher_id == user.id,
-    ).first()
-
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Local assignment not found")
-
-    attempts_data = moodle_call(
-        token    = body.moodle_token,
-        function = "mod_quiz_get_user_attempts",
-        params   = {
-            "quizid":          body.quiz_id,
-            "status":          "finished",
-            "includepreviews": 0
-        },
-        site_url = body.site_url
-    )
-
-    results = []
-
-    for attempt in attempts_data.get("attempts", []):
-        attempt_id = attempt.get("id")
-        userid     = attempt.get("userid")
-
-        attempt_data = moodle_call(
-            token    = body.moodle_token,
-            function = "mod_quiz_get_attempt_data",
-            params   = {"attemptid": attempt_id, "page": -1},
-            site_url = body.site_url
-        )
-
-        essay_text = ""
-        for question in attempt_data.get("questions", []):
-            if question.get("type") == "essay":
-                essay_text += question.get("responsefileareas", "")
-                for key, val in question.get("questionsummary", {}).items():
-                    if "answer" in key.lower():
-                        essay_text += str(val)
-
-        if not essay_text.strip():
-            continue
-
-        try:
-            rubric = json.loads(assignment.rubric) if assignment.rubric else None
-            grade  = grade_essay(essay_text, rubric)
-
-            results.append({
-                "moodle_user_id": userid,
-                "attempt_id":     attempt_id,
-                "score":          grade.get("score", 0),
-                "feedback":       grade.get("feedback", ""),
-                "status":         "graded"
-            })
-
-        except Exception as e:
-            results.append({
-                "moodle_user_id": userid,
-                "error":          str(e),
-                "status":         "failed"
-            })
-
-    return {
-        "success":      True,
-        "total_graded": len(results),
-        "results":      results
-    }
-
-
 # ── POST /api/teacher/moodle/create-assignment ───────────────────────────
-class MoodleCreateAssignmentRequest(BaseModel):
-    moodle_token:        str
-    course_id:           int
-    name:                str
-    instructions:        str
-    due_date:            Optional[int] = None
-    max_grade:           Optional[int] = 100
-    local_assignment_id: int
-    site_url:            str = DEFAULT_MOODLE_URL
-
-
 @router.post("/moodle/create-assignment")
 def create_moodle_assignment(
     body: MoodleCreateAssignmentRequest,
@@ -462,7 +1265,6 @@ def create_moodle_assignment(
         models.Assignment.id         == body.local_assignment_id,
         models.Assignment.teacher_id == user.id,
     ).first()
-
     if assignment:
         assignment.moodle_assignment_id = moodle_assignment_id
         assignment.moodle_course_id     = body.course_id
