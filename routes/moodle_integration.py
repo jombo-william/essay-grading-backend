@@ -286,128 +286,128 @@ def sync_moodle_students(
 
 
 # ── GET /api/teacher/moodle/quizzes ──────────────────────────────────────
-@router.get("/moodle/quizzes")
-def get_moodle_quizzes(
-    moodle_token: str,
-    course_id:    int,
-    site_url:     str = DEFAULT_MOODLE_URL,
-    ctx: dict = Depends(require_teacher)
-):
-    data = moodle_call(
-        token    = moodle_token,
-        function = "mod_quiz_get_quizzes_by_courses",
-        params   = {"courseids[0]": course_id},
-        site_url = site_url
-    )
-    return {"success": True, "quizzes": data.get("quizzes", [])}
+# @router.get("/moodle/quizzes")
+# def get_moodle_quizzes(
+#     moodle_token: str,
+#     course_id:    int,
+#     site_url:     str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+    # data = moodle_call(
+    #     token    = moodle_token,
+    #     function = "mod_quiz_get_quizzes_by_courses",
+    #     params   = {"courseids[0]": course_id},
+    #     site_url = site_url
+    # )
+    # return {"success": True, "quizzes": data.get("quizzes", [])}
 
 
 # ── GET /api/teacher/moodle/quiz-attempts ────────────────────────────────
-@router.get("/moodle/quiz-attempts")
-def get_quiz_attempts(
-    moodle_token: str,
-    quiz_id:      int,
-    site_url:     str = DEFAULT_MOODLE_URL,
-    ctx: dict = Depends(require_teacher)
-):
-    data = moodle_call(
-        token    = moodle_token,
-        function = "mod_quiz_get_user_attempts",
-        params   = {
-            "quizid":          quiz_id,
-            "status":          "finished",
-            "includepreviews": 0
-        },
-        site_url = site_url
-    )
-    return {"success": True, "attempts": data.get("attempts", [])}
+# @router.get("/moodle/quiz-attempts")
+# def get_quiz_attempts(
+#     moodle_token: str,
+#     quiz_id:      int,
+#     site_url:     str = DEFAULT_MOODLE_URL,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     data = moodle_call(
+#         token    = moodle_token,
+#         function = "mod_quiz_get_user_attempts",
+#         params   = {
+#             "quizid":          quiz_id,
+#             "status":          "finished",
+#             "includepreviews": 0
+#         },
+#         site_url = site_url
+#     )
+    # return {"success": True, "attempts": data.get("attempts", [])}
 
 
 # ── POST /api/teacher/moodle/autograde-quiz ──────────────────────────────
-class MoodleQuizGradeRequest(BaseModel):
-    moodle_token:        str
-    quiz_id:             int
-    local_assignment_id: int
-    site_url:            str = DEFAULT_MOODLE_URL
+# class MoodleQuizGradeRequest(BaseModel):
+#     moodle_token:        str
+#     quiz_id:             int
+#     local_assignment_id: int
+#     site_url:            str = DEFAULT_MOODLE_URL
 
 
-@router.post("/moodle/autograde-quiz")
-async def autograde_moodle_quiz(
-    body: MoodleQuizGradeRequest,
-    ctx: dict = Depends(require_teacher)
-):
-    from services.grader import grade_essay
+# @router.post("/moodle/autograde-quiz")
+# async def autograde_moodle_quiz(
+#     body: MoodleQuizGradeRequest,
+#     ctx: dict = Depends(require_teacher)
+# ):
+#     from services.grader import grade_essay
 
-    user = ctx["user"]
-    db   = ctx["db"]
+#     user = ctx["user"]
+#     db   = ctx["db"]
 
-    assignment = db.query(models.Assignment).filter(
-        models.Assignment.id         == body.local_assignment_id,
-        models.Assignment.teacher_id == user.id,
-    ).first()
+#     assignment = db.query(models.Assignment).filter(
+#         models.Assignment.id         == body.local_assignment_id,
+#         models.Assignment.teacher_id == user.id,
+#     ).first()
 
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Local assignment not found")
+#     if not assignment:
+#         raise HTTPException(status_code=404, detail="Local assignment not found")
 
-    attempts_data = moodle_call(
-        token    = body.moodle_token,
-        function = "mod_quiz_get_user_attempts",
-        params   = {
-            "quizid":          body.quiz_id,
-            "status":          "finished",
-            "includepreviews": 0
-        },
-        site_url = body.site_url
-    )
+#     attempts_data = moodle_call(
+#         token    = body.moodle_token,
+#         function = "mod_quiz_get_user_attempts",
+#         params   = {
+#             "quizid":          body.quiz_id,
+#             "status":          "finished",
+#             "includepreviews": 0
+#         },
+#         site_url = body.site_url
+#     )
 
-    results = []
+#     results = []
 
-    for attempt in attempts_data.get("attempts", []):
-        attempt_id = attempt.get("id")
-        userid     = attempt.get("userid")
+#     for attempt in attempts_data.get("attempts", []):
+#         attempt_id = attempt.get("id")
+#         userid     = attempt.get("userid")
 
-        attempt_data = moodle_call(
-            token    = body.moodle_token,
-            function = "mod_quiz_get_attempt_data",
-            params   = {"attemptid": attempt_id, "page": -1},
-            site_url = body.site_url
-        )
+#         attempt_data = moodle_call(
+#             token    = body.moodle_token,
+#             function = "mod_quiz_get_attempt_data",
+#             params   = {"attemptid": attempt_id, "page": -1},
+#             site_url = body.site_url
+#         )
 
-        essay_text = ""
-        for question in attempt_data.get("questions", []):
-            if question.get("type") == "essay":
-                essay_text += question.get("responsefileareas", "")
-                for key, val in question.get("questionsummary", {}).items():
-                    if "answer" in key.lower():
-                        essay_text += str(val)
+#         essay_text = ""
+#         for question in attempt_data.get("questions", []):
+#             if question.get("type") == "essay":
+#                 essay_text += question.get("responsefileareas", "")
+#                 for key, val in question.get("questionsummary", {}).items():
+#                     if "answer" in key.lower():
+#                         essay_text += str(val)
 
-        if not essay_text.strip():
-            continue
+#         if not essay_text.strip():
+#             continue
 
-        try:
-            rubric = json.loads(assignment.rubric) if assignment.rubric else None
-            grade  = grade_essay(essay_text, rubric)
+#         try:
+#             rubric = json.loads(assignment.rubric) if assignment.rubric else None
+#             grade  = grade_essay(essay_text, rubric)
 
-            results.append({
-                "moodle_user_id": userid,
-                "attempt_id":     attempt_id,
-                "score":          grade.get("score", 0),
-                "feedback":       grade.get("feedback", ""),
-                "status":         "graded"
-            })
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "attempt_id":     attempt_id,
+#                 "score":          grade.get("score", 0),
+#                 "feedback":       grade.get("feedback", ""),
+#                 "status":         "graded"
+#             })
 
-        except Exception as e:
-            results.append({
-                "moodle_user_id": userid,
-                "error":          str(e),
-                "status":         "failed"
-            })
+#         except Exception as e:
+#             results.append({
+#                 "moodle_user_id": userid,
+#                 "error":          str(e),
+#                 "status":         "failed"
+#             })
 
-    return {
-        "success":      True,
-        "total_graded": len(results),
-        "results":      results
-    }
+#     return {
+#         "success":      True,
+#         "total_graded": len(results),
+#         "results":      results
+#     }
 
 
 # ── POST /api/teacher/moodle/create-assignment ───────────────────────────

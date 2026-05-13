@@ -4,10 +4,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+
+from database import engine
+import models
+import sqlalchemy as sa
+
+status = sa.Column(
+    sa.Enum("pending", "approved", "rejected", name="status_enum"),
+    nullable=False
+)
 # app.py — add after the existing imports at the top
 from routes.student_moodle import router as student_moodle_router
 
+
 #load_dotenv()
+models.Base.metadata.create_all(bind=engine)
 
 load_dotenv(dotenv_path=r"C:\Users\comadmin\Desktop\jombo\essayf-and-backend\backend\backend-jombo-essaygrade\.env")
 
@@ -20,8 +31,14 @@ from routes import google_classroom, moodle_integration
 from routes.student_classroom import router as student_classroom_router
 from routes import grading
 
+# from routes.quiz_routes   import router as quiz_router
+# from routes.student_quiz  import router as student_quiz_router
+
+
 
 app = FastAPI(title="JomboEssayGrade API")
+
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +69,11 @@ app.include_router(moodle_integration.router, prefix="/api/teacher", tags=["Mood
 app.include_router(student_classroom_router, prefix="/api/student", tags=["Student Classroom"])
 app.include_router(grading.router, prefix="/api", tags=["Grading"])
 app.include_router(student_moodle_router, prefix="/api/student", tags=["Student Moodle"])
+# Under teacher routes
+# app.include_router(quiz_router,        prefix="/api/teacher", tags=["quizzes"])
+
+# # Under student routes
+# app.include_router(student_quiz_router, prefix="/api/student", tags=["student-quizzes"])
 
 @app.get("/")
 def root():
