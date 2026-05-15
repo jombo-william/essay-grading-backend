@@ -1,5 +1,4 @@
 
-
 from re import sub
 
 import requests
@@ -11,7 +10,7 @@ import models
 import json
 import asyncio
 import time
-import random
+import re as _re
 
 router = APIRouter()
 
@@ -43,6 +42,81 @@ def moodle_call(token: str, function: str, params: dict, site_url: str = DEFAULT
             status_code=503,
             detail=f"Cannot connect to Moodle at {site_url}"
         )
+
+
+def download_moodle_file(url: str, token: str) -> bytes:
+    """Download a file from Moodle, appending the token for auth."""
+    sep = "&" if "?" in url else "?"
+    download_url = f"{url}{sep}token={token}"
+    response = requests.get(download_url, timeout=60)
+    response.raise_for_status()
+    return response.content
+
+
+def extract_essay_text_from_submission(sub: dict, moodle_token: str) -> str:
+    """
+    Try every possible submission plugin to find essay text.
+    Priority:
+      1. onlinetext  (typed directly in Moodle)
+      2. file        (uploaded PDF / DOCX / image / txt)
+      3. comments    (fallback)
+    Returns the best non-empty text found, or "".
+    """
+    from file_extractor import extract_text_from_bytes
+
+    essay_text = ""
+
+    for plugin in sub.get("plugins", []):
+        ptype = plugin.get("type", "")
+
+        # ── 1. Online text ────────────────────────────────────────────────
+        if ptype == "onlinetext":
+            for field in plugin.get("editorfields", []):
+                raw = field.get("text", "")
+                if raw.strip():
+                    clean = _re.sub(r'<[^>]+>', ' ', raw)
+                    clean = _re.sub(r'\s+', ' ', clean).strip()
+                    if clean:
+                        essay_text += clean + "\n\n"
+
+        # ── 2. File upload ────────────────────────────────────────────────
+        elif ptype == "file":
+            for filearea in plugin.get("fileareas", []):
+                for f in filearea.get("files", []):
+                    filename    = f.get("filename", "")
+                    file_url    = f.get("fileurl", "")
+                    mimetype    = f.get("mimetype", "")
+
+                    # skip empty placeholder files Moodle adds by default
+                    filesize = f.get("filesize", 0)
+                    if not file_url or filesize == 0:
+                        print(f"DEBUG skipping placeholder file: {filename}")
+                        continue
+
+                    print(f"DEBUG downloading file: {filename} ({mimetype}, {filesize} bytes) from {file_url[:60]}...")
+
+                    try:
+                        raw_bytes = download_moodle_file(file_url, moodle_token)
+                        extracted = extract_text_from_bytes(raw_bytes, filename)
+                        if extracted.strip():
+                            essay_text += extracted.strip() + "\n\n"
+                            print(f"DEBUG extracted {len(extracted)} chars from {filename}")
+                        else:
+                            print(f"DEBUG extraction returned empty for {filename}")
+                    except Exception as e:
+                        print(f"DEBUG file download/extract failed for {filename}: {e}")
+
+        # ── 3. Comments (last resort) ─────────────────────────────────────
+        elif ptype == "comments":
+            for field in plugin.get("editorfields", []):
+                raw = field.get("text", "").strip()
+                if raw and len(raw) > 20:   # ignore trivial one-liners
+                    clean = _re.sub(r'<[^>]+>', ' ', raw)
+                    clean = _re.sub(r'\s+', ' ', clean).strip()
+                    if clean:
+                        essay_text += clean + "\n\n"
+
+    return essay_text.strip()
 
 
 # ── GET /api/teacher/moodle/courses ──────────────────────────────────────
@@ -133,7 +207,7 @@ def get_quiz_attempts(
     return {"success": True, "attempts": data.get("attempts", [])}
 
 
-# ── ALL Pydantic models together — BEFORE the POST routes ────────────────
+# ── Pydantic models ───────────────────────────────────────────────────────
 
 class MoodleAutoGradeRequest(BaseModel):
     moodle_token:         str
@@ -179,6 +253,13 @@ async def autograde_moodle(
     if not assignment:
         raise HTTPException(status_code=404, detail="Local assignment not found")
 
+    # subs_data = moodle_call(
+    #     token    = body.moodle_token,
+    #     function = "mod_assign_get_submissions",
+    #     params   = {"assignmentids[0]": body.moodle_assignment_id},
+    #     site_url = body.site_url
+    # )
+
     subs_data = moodle_call(
         token    = body.moodle_token,
         function = "mod_assign_get_submissions",
@@ -186,33 +267,67 @@ async def autograde_moodle(
         site_url = body.site_url
     )
 
+    # fetch enrolled users to resolve userid → fullname
+    enrolled_raw = moodle_call(
+        token    = body.moodle_token,
+        function = "mod_assign_get_participants",
+        params   = {"assignid": body.moodle_assignment_id},
+        site_url = body.site_url
+    )
+    user_names = {
+        u["id"]: u.get("fullname", f"User {u['id']}")
+        for u in (enrolled_raw if isinstance(enrolled_raw, list) else [])
+    }
+
     results = []
 
     for assign in subs_data.get("assignments", []):
-        for sub in assign.get("submissions", []):
-            if sub.get("status") != "submitted":
+        all_subs = assign.get("submissions", [])
+        print(f"DEBUG autograde: found {len(all_subs)} total submissions")
+
+        for sub in all_subs:
+            sub_status = sub.get("status", "unknown")
+           #userid     = sub.get("userid")
+            userid     = sub.get("userid")
+            username   = user_names.get(userid) or f"User {userid}"
+            #username   = sub.get("fullname") or sub.get("userfullname") or f"User {userid}"
+            plugins    = [p.get("type") for p in sub.get("plugins", [])]
+            print(f"DEBUG sub userid={userid} status={repr(sub_status)} plugins={plugins}")
+
+            # Accept "submitted" and "new" — gate on content, not status
+            ACCEPTED_STATUSES = {"submitted", "new"}
+            if sub_status not in ACCEPTED_STATUSES:
+                print(f"DEBUG skipping userid={userid} — status={repr(sub_status)}")
                 continue
 
-            essay_text = ""
-            for plugin in sub.get("plugins", []):
-                if plugin.get("type") == "onlinetext":
-                    for field in plugin.get("editorfields", []):
-                        essay_text += field.get("text", "")
+            # ── Extract text from ALL plugin types (online text + files) ──
+            essay_text = extract_essay_text_from_submission(sub, body.moodle_token)
 
             if not essay_text.strip():
+                print(f"DEBUG skipping userid={userid} — no essay text found after extraction")
+                results.append({
+                    #"moodle_user_id": userid,
+                    "moodle_user_id": username,
+                    #"moodle_user_id": sub.get("fullname") or f"User {username}",
+                    "status":  "skipped",
+                    "error":   "No readable text found in submission (tried online text and uploaded files)",
+                    "source":  "moodle"
+                })
                 continue
+
+            print(f"DEBUG grading userid={userid} — {len(essay_text)} chars extracted")
 
             rubric = None
             if assignment.rubric:
                 try:
                     rubric = json.loads(assignment.rubric)
-                except:
+                except Exception:
                     rubric = None
 
             await asyncio.sleep(1)
 
+            grade      = None
             last_error = None
-            grade = None
             for attempt in range(4):
                 try:
                     grade = grade_essay(essay_text, rubric)
@@ -234,9 +349,12 @@ async def autograde_moodle(
                 if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
                     error_msg = "AI grading service temporarily unavailable (503). Please retry."
                 results.append({
-                    "moodle_user_id": sub["userid"],
-                    "error": error_msg,
-                    "status": "failed"
+                    #"moodle_user_id": userid,
+                    "moodle_user_id": username,
+                    #"moodle_user_id": sub.get("fullname") or f"User {username}",
+                    "error":  error_msg,
+                    "status": "failed",
+                    "source": "moodle"
                 })
                 continue
 
@@ -247,7 +365,7 @@ async def autograde_moodle(
                     function = "mod_assign_save_grade",
                     params   = {
                         "assignmentid":                                      body.moodle_assignment_id,
-                        "userid":                                            sub["userid"],
+                        "userid":                                            userid,
                         "grade":                                             float(grade.get("total_score", grade.get("score", 0))),
                         "attemptnumber":                                     -1,
                         "addattempt":                                        0,
@@ -259,28 +377,41 @@ async def autograde_moodle(
                     site_url = body.site_url
                 )
                 results.append({
-                    "moodle_user_id": sub["userid"],
-                    "score":  grade.get("total_score", grade.get("score", 0)),
-                    "status": "graded"
+                    #"moodle_user_id": userid,
+                    "moodle_user_id": username,
+                    #"moodle_user_id": sub.get("fullname") or f"User {username}",
+                    "score":    grade.get("total_score", grade.get("score", 0)),
+                    "feedback": grade.get("overall_feedback", grade.get("feedback", "")),
+                    "status":   "graded",
+                    "source":   "moodle"
                 })
+                print(f"DEBUG graded userid={userid} score={grade.get('total_score', grade.get('score', 0))}")
             except Exception as e:
                 error_msg = str(e)
                 if "googleapis.com" in error_msg or "generativelanguage" in error_msg:
                     error_msg = "AI grading service temporarily unavailable (503). Please retry."
                 results.append({
-                    "moodle_user_id": sub["userid"],
+                    #"moodle_user_id": userid,
+                    "moodle_user_id": username,
+                    #"moodle_user_id": sub.get("fullname") or f"User {username}",
                     "error":  error_msg,
-                    "status": "failed"
+                    "status": "failed",
+                    "source": "moodle"
                 })
 
+    graded_count  = len([r for r in results if r["status"] == "graded"])
+    skipped_count = len([r for r in results if r["status"] == "skipped"])
+    print(f"DEBUG autograde complete: {graded_count} graded, {skipped_count} skipped, {len(results)} total")
+
     return {
-        "success":      True,
-        "total_graded": len(results),
-        "results":      results
+        "success":       True,
+        "total_graded":  graded_count,
+        "total_skipped": skipped_count,
+        "results":       results
     }
 
 
-
+# ── POST /api/teacher/moodle/autograde-quiz ──────────────────────────────
 @router.post("/moodle/autograde-quiz")
 async def autograde_moodle_quiz(
     body: MoodleQuizGradeRequest,
@@ -299,20 +430,12 @@ async def autograde_moodle_quiz(
     if not assignment:
         raise HTTPException(status_code=404, detail="Local assignment not found")
 
-    # Step 1: Get all enrolled users
     enrolled = moodle_call(
         token    = body.moodle_token,
         function = "core_enrol_get_enrolled_users",
         params   = {"courseid": body.course_id},
         site_url = body.site_url
     )
-
-    # Build a userid -> fullname map
-    user_names = {}
-    for u in enrolled:
-        uid = u.get("id")
-        if uid:
-            user_names[uid] = u.get("fullname", f"User {uid}")
 
     results = []
 
@@ -323,7 +446,6 @@ async def autograde_moodle_quiz(
         if userid in [1, 2]:
             continue
 
-        # Step 2: Get this user's finished attempts
         attempts_data = moodle_call(
             token    = body.moodle_token,
             function = "mod_quiz_get_user_attempts",
@@ -343,7 +465,6 @@ async def autograde_moodle_quiz(
         attempt    = attempts[-1]
         attempt_id = attempt.get("id")
 
-        # Step 3: Get attempt review
         try:
             review_data = moodle_call(
                 token    = body.moodle_token,
@@ -354,33 +475,28 @@ async def autograde_moodle_quiz(
         except Exception as e:
             results.append({
                 "moodle_user_id": fullname,
-                "error": f"Could not fetch attempt review: {str(e)}",
-                "status": "failed"
+                "error":  f"Could not fetch attempt review: {str(e)}",
+                "status": "failed",
+                "source": "moodle"
             })
             continue
 
-        # Step 4: Extract essay text — try multiple fields
         essay_parts = []
         for question in review_data.get("questions", []):
             qtype = question.get("type", "")
             if qtype != "essay":
                 continue
 
-            # Try responsesummary first
             answer = question.get("responsesummary", "").strip()
 
-            # If empty, try stripping HTML from the rendered html field
             if not answer:
                 html = question.get("html", "")
                 if html:
-                    # Strip HTML tags to get plain text
                     clean = re.sub(r'<[^>]+>', ' ', html)
                     clean = re.sub(r'\s+', ' ', clean).strip()
-                    # Only use if it looks like actual content (not just UI chrome)
                     if len(clean) > 30:
                         answer = clean
 
-            # Also try questionsummary as fallback
             if not answer:
                 answer = question.get("questionsummary", "").strip()
 
@@ -394,20 +510,20 @@ async def autograde_moodle_quiz(
         if not essay_text:
             results.append({
                 "moodle_user_id": fullname,
-                "error": "No essay answer found in attempt",
-                "status": "skipped"
+                "error":  "No essay answer found in attempt",
+                "status": "skipped",
+                "source": "moodle"
             })
             continue
 
-        # Step 5: Grade with retry
         rubric = None
         if assignment.rubric:
             try:
                 rubric = json.loads(assignment.rubric)
-            except:
+            except Exception:
                 pass
 
-        grade = None
+        grade      = None
         last_error = None
         for attempt_num in range(4):
             try:
@@ -428,17 +544,19 @@ async def autograde_moodle_quiz(
         if grade is None:
             results.append({
                 "moodle_user_id": fullname,
-                "error": str(last_error) if last_error else "Grading failed",
-                "status": "failed"
+                "error":  str(last_error) if last_error else "Grading failed",
+                "status": "failed",
+                "source": "moodle"
             })
             continue
 
         results.append({
-            "moodle_user_id": fullname,   # now a name, not an ID
+            "moodle_user_id": fullname,
             "attempt_id":     attempt_id,
             "score":          grade.get("total_score", grade.get("score", 0)),
             "feedback":       grade.get("overall_feedback", grade.get("feedback", "")),
-            "status":         "graded"
+            "status":         "graded",
+            "source":         "moodle"
         })
 
         await asyncio.sleep(1)
@@ -512,7 +630,7 @@ def create_moodle_assignment(
             "grade":                               body.max_grade,
             "submissiondrafts":                    0,
             "assignsubmission_onlinetext_enabled": 1,
-            "assignsubmission_file_enabled":       0,
+            "assignsubmission_file_enabled":       1,
         },
         site_url = body.site_url
     )
