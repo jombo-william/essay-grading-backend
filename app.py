@@ -1,23 +1,17 @@
-# C:\PROJECTS\Essay-Grader\backend\app.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base
-from routes import auth, students, teacher
+from routes import auth
 
-# Create all tables automatically
-Base.metadata.create_all(bind=engine)
+# Don't recreate tables - they already exist in Supabase
+# Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Essay Grader API")
 
 # Allow React frontend to talk to this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,8 +19,10 @@ app.add_middleware(
 
 # Routes
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
-app.include_router(students.router, prefix="/api/students", tags=["Students"])
-app.include_router(teacher.router, prefix="/api/teachers", tags=["Teachers"])
+
+# Import and add teacher routes
+from routes import teacher
+app.include_router(teacher.router, prefix="/api/teacher", tags=["Teacher"])
 
 @app.get("/")
 def root():

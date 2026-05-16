@@ -6,10 +6,10 @@ from typing import List, Optional
 from datetime import datetime
 
 from database import get_db
-from models.user import User
-from models.assignment import Assignment
-from models.submission import Submission
-from models.message import Message
+from models import User
+# from models import Assignment
+# from models import Submission
+# from models import Message
 
 router = APIRouter()
 
