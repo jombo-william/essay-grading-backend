@@ -1,6 +1,11 @@
 .env
 __pycache__/
+<<<<<<< HEAD
 *.pyc
 models/
 google_credentials.json
 .env
+=======
+__pycache__/
+*.pyc
+>>>>>>> 34adc2428c93d3a4cea50e7ca0d96937c686a158

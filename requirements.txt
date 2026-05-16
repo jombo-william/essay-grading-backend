@@ -1,6 +1,7 @@
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.12.1
+<<<<<<< HEAD
 bcrypt==4.0.1
 blinker==1.9.0
 certifi==2026.2.25
@@ -26,6 +27,16 @@ googleapis-common-protos==1.74.0
 greenlet==3.3.2
 grpcio==1.80.0
 grpcio-status==1.71.2
+=======
+bcrypt==5.0.0
+cffi==2.0.0
+click==8.3.1
+colorama==0.4.6
+cryptography==46.0.5
+ecdsa==0.19.1
+fastapi==0.135.1
+greenlet==3.3.2
+>>>>>>> 34adc2428c93d3a4cea50e7ca0d96937c686a158
 h11==0.16.0
 hf-xet==1.4.3
 httpcore==1.0.9
@@ -33,6 +44,20 @@ httplib2==0.31.2
 httpx==0.28.1
 huggingface_hub==1.11.0
 idna==3.11
+passlib==1.7.4
+pyasn1==0.6.2
+pycparser==3.0
+pydantic==2.12.5
+pydantic_core==2.41.5
+PyMySQL==1.1.2
+python-dotenv==1.2.2
+python-jose==3.5.0
+rsa==4.9.1
+six==1.17.0
+SQLAlchemy==2.0.48
+blinker==1.9.0
+Flask==3.1.3
+flask-cors==6.0.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
 joblib==1.5.3
@@ -41,6 +66,7 @@ MarkupSafe==3.0.3
 mdurl==0.1.2
 mpmath==1.3.0
 mysql-connector-python==9.6.0
+<<<<<<< HEAD
 networkx==3.6.1
 numpy==2.4.4
 oauthlib==3.3.1
@@ -75,6 +101,8 @@ setuptools==81.0.0
 shellingham==1.5.4
 six==1.17.0
 SQLAlchemy==2.0.48
+=======
+>>>>>>> 34adc2428c93d3a4cea50e7ca0d96937c686a158
 starlette==0.52.1
 sympy==1.14.0
 threadpoolctl==3.6.0
