@@ -1,31 +1,30 @@
-from datetime import datetime
 
-from sqlalchemy import JSON,  Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
+
+#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
-from sqlalchemy.dialects.postgresql import JSON
-from sqlalchemy import JSON,  Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, Enum
+
 
 class User(Base):
     __tablename__ = "users"
-    quizzes = relationship("Quiz", back_populates="teacher", cascade="all, delete-orphan")
 
     id                  = Column(Integer, primary_key=True, index=True)
     name                = Column(String(100), nullable=False)
     email               = Column(String(150), unique=True, nullable=False)
     password            = Column(String(255), nullable=False)
-    role                = Column(Enum("teacher", "student"), nullable=False)
+    #role                = Column(Enum("teacher", "student"), nullable=False)
+    role = Column(String(20), nullable=False)
+    #role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
     registration_number = Column(String(50), nullable=True)
     phone               = Column(String(20), nullable=True)
     is_active           = Column(Boolean, default=True)
     created_at          = Column(TIMESTAMP, server_default=func.now())
     updated_at          = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-    # Teacher side — classes this teacher is assigned to (via junction table)
     teacher_classes = relationship("TeacherClass", back_populates="teacher", cascade="all, delete-orphan")
-
-    # Student side — classes this student is enrolled in (via junction table)
     enrollments = relationship("ClassEnrollment", back_populates="student", cascade="all, delete-orphan")
 
     assignments = relationship("Assignment", back_populates="teacher")
@@ -51,7 +50,6 @@ class Class(Base):
     __tablename__ = "classes"
 
     id          = Column(Integer, primary_key=True, index=True)
-    # NOTE: teacher_id removed — teachers are linked via TeacherClass junction table
     name        = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     subject     = Column(String(100), nullable=True)
@@ -61,16 +59,12 @@ class Class(Base):
     created_at  = Column(TIMESTAMP, server_default=func.now())
     updated_at  = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-    # Teachers assigned to this class (via junction table)
     teacher_classes = relationship("TeacherClass", back_populates="cls", cascade="all, delete-orphan")
-
-    # Assignments and enrolled students
-    assignments = relationship("Assignment",     back_populates="cls", cascade="all, delete-orphan")
+    assignments = relationship("Assignment", back_populates="cls", cascade="all, delete-orphan")
     enrollments = relationship("ClassEnrollment", back_populates="cls", cascade="all, delete-orphan")
 
 
 class TeacherClass(Base):
-    """Junction table — assigns teachers to classes (many-to-many)."""
     __tablename__ = "teacher_classes"
 
     __table_args__ = (
@@ -78,16 +72,15 @@ class TeacherClass(Base):
     )
 
     id          = Column(Integer, primary_key=True, index=True)
-    teacher_id  = Column(Integer, ForeignKey("users.id",    ondelete="CASCADE"), nullable=False)
-    class_id    = Column(Integer, ForeignKey("classes.id",  ondelete="CASCADE"), nullable=False)
+    teacher_id  = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    class_id    = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=False)
     assigned_at = Column(TIMESTAMP, server_default=func.now())
 
-    teacher = relationship("User",  back_populates="teacher_classes")
+    teacher = relationship("User", back_populates="teacher_classes")
     cls     = relationship("Class", back_populates="teacher_classes")
 
 
 class ClassEnrollment(Base):
-    """Junction table — links students to classes (many-to-many)."""
     __tablename__ = "class_enrollments"
 
     __table_args__ = (
@@ -96,33 +89,40 @@ class ClassEnrollment(Base):
 
     id          = Column(Integer, primary_key=True, index=True)
     class_id    = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=False)
-    student_id  = Column(Integer, ForeignKey("users.id",   ondelete="CASCADE"), nullable=False)
+    student_id  = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     enrolled_at = Column(TIMESTAMP, server_default=func.now())
 
     cls     = relationship("Class", back_populates="enrollments")
-    student = relationship("User",  back_populates="enrollments")
+    student = relationship("User", back_populates="enrollments")
 
 
 class Assignment(Base):
     __tablename__ = "assignments"
 
-    id                 = Column(Integer, primary_key=True, index=True)
-    teacher_id         = Column(Integer, ForeignKey("users.id",   ondelete="CASCADE"),  nullable=False)
-    class_id           = Column(Integer, ForeignKey("classes.id", ondelete="SET NULL"), nullable=True)
+    id           = Column(Integer, primary_key=True, index=True)
+    teacher_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    class_id     = Column(Integer, ForeignKey("classes.id", ondelete="SET NULL"), nullable=True)
+
     title              = Column(String(255), nullable=False)
     description        = Column(Text, nullable=True)
     instructions       = Column(Text, nullable=False)
     reference_material = Column(Text, nullable=True)
     max_score          = Column(Integer, default=100)
-    rubric             = Column(Text, nullable=True)  # JSON string
+    due_date           = Column(DateTime, nullable=False)
+    rubric             = Column(Text, nullable=True)
+
     is_active          = Column(Boolean, default=True)
     gc_coursework_id   = Column(String(100), nullable=True)
-    created_at         = Column(TIMESTAMP, server_default=func.now())
-    updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_course_id     = Column(Integer, nullable=True)
+    moodle_site_url      = Column(String(255), nullable=True)
 
-    teacher     = relationship("User",                 back_populates="assignments")
-    cls         = relationship("Class",                back_populates="assignments")
-    submissions = relationship("Submission",           back_populates="assignment")
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    teacher     = relationship("User", back_populates="assignments")
+    cls         = relationship("Class", back_populates="assignments")
+    submissions = relationship("Submission", back_populates="assignment")
     attachments = relationship("AssignmentAttachment", back_populates="assignment")
 
 
@@ -147,7 +147,8 @@ class Submission(Base):
     assignment_id      = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
     student_id         = Column(Integer, ForeignKey("users.id",       ondelete="CASCADE"), nullable=False)
     essay_text         = Column(Text, nullable=False)
-    submit_mode        = Column(Enum("write", "upload"), default="write")
+    submit_mode = Column(String(20), default="write")
+    #submit_mode        = Column(Enum("write", "upload"), default="write")
     file_name          = Column(String(255), nullable=True)
     file_path          = Column(String(500), nullable=True)
     ai_score           = Column(Integer, nullable=True)
@@ -157,12 +158,28 @@ class Submission(Base):
     final_score        = Column(Integer, nullable=True)
     teacher_feedback   = Column(Text, nullable=True)
     graded_at          = Column(TIMESTAMP, nullable=True)
-    status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
+    status = Column(String(20), default="pending")
+    #status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
     submitted_at       = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    # In models.py add these two columns to your Assignment model
+    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_course_id     = Column(Integer, nullable=True)
 
-    assignment   = relationship("Assignment",    back_populates="submissions")
-    student      = relationship("User",          back_populates="submissions")
+    # final_score      = Column(Integer, nullable=True)
+    # teacher_feedback = Column(Text, nullable=True)
+    # graded_at        = Column(TIMESTAMP, nullable=True)
+
+    # status = Column(
+    #     Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
+    #     default="pending"
+    # )
+
+    # submitted_at = Column(TIMESTAMP, server_default=func.now())
+    # updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    assignment   = relationship("Assignment", back_populates="submissions")
+    student      = relationship("User", back_populates="submissions")
     ai_detection = relationship("AIDetectionLog", back_populates="submission", uselist=False)
 
 
@@ -173,32 +190,124 @@ class AIDetectionLog(Base):
     submission_id   = Column(Integer, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
     detection_score = Column(Integer, nullable=False)
     flagged         = Column(Boolean, default=False)
-    indicators      = Column(Text, nullable=True)   # JSON array
+    indicators      = Column(Text, nullable=True)
     model_version   = Column(String(50), nullable=True)
     detected_at     = Column(TIMESTAMP, server_default=func.now())
 
     submission = relationship("Submission", back_populates="ai_detection")
 
-    # ── ADD THESE TWO CLASSES TO THE BOTTOM OF models.py ─────────────────────────
+class Quiz(Base):
+    __tablename__ = "quizzes"
 
+    id               = Column(Integer, primary_key=True, index=True)
+    teacher_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    class_id         = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=True)
+
+    title            = Column(String(255), nullable=False)
+    description      = Column(Text, nullable=True)
+    instructions     = Column(Text, nullable=True)
+    time_limit       = Column(Integer, default=60)
+    due_date         = Column(DateTime, nullable=False)
+    is_active        = Column(Boolean, default=True)
+
+    moodle_quiz_id   = Column(Integer, nullable=True)
+    moodle_course_id = Column(Integer, nullable=True)
+    moodle_site_url  = Column(String(255), nullable=True)
+
+    created_at       = Column(TIMESTAMP, server_default=func.now())
+    updated_at       = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    teacher   = relationship("User", foreign_keys=[teacher_id])
+    cls       = relationship("Class", foreign_keys=[class_id])
+    questions = relationship("QuizQuestion", back_populates="quiz", cascade="all, delete-orphan")
+    attempts  = relationship("QuizAttempt", back_populates="quiz", cascade="all, delete-orphan")
+
+
+class QuizQuestion(Base):
+    __tablename__ = "quiz_questions"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    quiz_id        = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
+
+    type           = Column(String(20), nullable=False)  # mcq / structured
+    prompt         = Column(Text, nullable=False)
+    marks          = Column(Integer, default=1)
+
+    options        = Column(Text, nullable=True)   # JSON string
+    correct_option = Column(String(1), nullable=True)
+
+    marking_guide  = Column(Text, nullable=True)
+    order_index    = Column(Integer, default=0)
+
+    created_at     = Column(TIMESTAMP, server_default=func.now())
+
+    quiz    = relationship("Quiz", back_populates="questions")
+    answers = relationship("QuizAnswer", back_populates="question")
+
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    quiz_id           = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
+    student_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    status            = Column(String(20), default="submitted")
+    total_score       = Column(Integer, nullable=True)
+    max_score         = Column(Integer, nullable=True)
+
+    started_at        = Column(TIMESTAMP, server_default=func.now())
+    submitted_at      = Column(TIMESTAMP, nullable=True)
+    graded_at         = Column(TIMESTAMP, nullable=True)
+
+    moodle_attempt_id = Column(Integer, nullable=True)
+
+    quiz    = relationship("Quiz", back_populates="attempts")
+    student = relationship("User", foreign_keys=[student_id])
+    answers = relationship("QuizAnswer", back_populates="attempt", cascade="all, delete-orphan")
+
+
+class QuizAnswer(Base):
+    __tablename__ = "quiz_answers"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    attempt_id      = Column(Integer, ForeignKey("quiz_attempts.id", ondelete="CASCADE"), nullable=False)
+    question_id     = Column(Integer, ForeignKey("quiz_questions.id", ondelete="CASCADE"), nullable=False)
+
+    answer_text     = Column(Text, nullable=True)
+    selected_option = Column(String(1), nullable=True)
+
+    is_correct      = Column(Boolean, nullable=True)
+    score_awarded   = Column(Integer, nullable=True)
+
+    ai_feedback     = Column(Text, nullable=True)
+
+    created_at      = Column(TIMESTAMP, server_default=func.now())
+
+    attempt  = relationship("QuizAttempt", back_populates="answers")
+    question = relationship("QuizQuestion", back_populates="answers")
 class Exam(Base):
     __tablename__ = "exams"
 
     id           = Column(Integer, primary_key=True, index=True)
-    teacher_id   = Column(Integer, ForeignKey("users.id",    ondelete="CASCADE"), nullable=False)
-    class_id     = Column(Integer, ForeignKey("classes.id",  ondelete="CASCADE"), nullable=False)
+    teacher_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    class_id     = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), nullable=False)
+
     title        = Column(String(255), nullable=False)
     description  = Column(Text, nullable=True)
     instructions = Column(Text, nullable=False)
-    time_limit   = Column(Integer, default=60)       # minutes
-    is_active    = Column(Boolean, default=True)
-    created_at   = Column(TIMESTAMP, server_default=func.now())
-    updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-    teacher    = relationship("User",           foreign_keys=[teacher_id])
-    cls        = relationship("Class",          foreign_keys=[class_id])
-    questions  = relationship("ExamQuestion",   back_populates="exam", cascade="all, delete-orphan")
-    submissions= relationship("ExamSubmission", back_populates="exam", cascade="all, delete-orphan")
+    due_date   = Column(DateTime, nullable=False)
+    time_limit = Column(Integer, default=60)
+    is_active  = Column(Boolean, default=True)
+
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    teacher    = relationship("User", foreign_keys=[teacher_id])
+    cls        = relationship("Class", foreign_keys=[class_id])
+    questions  = relationship("ExamQuestion", back_populates="exam", cascade="all, delete-orphan")
+    submissions = relationship("ExamSubmission", back_populates="exam", cascade="all, delete-orphan")
 
 
 class ExamQuestion(Base):
@@ -206,14 +315,16 @@ class ExamQuestion(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     exam_id        = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
-    type           = Column(Enum("mcq", "structured"), nullable=False)
+    type = Column(String(20), nullable=False)
+    #type           = Column(Enum("mcq", "structured"), nullable=False)
     prompt         = Column(Text, nullable=False)
     marks          = Column(Integer, default=1)
-    options        = Column(Text, nullable=True)    # JSON array ["opt A", "opt B", "opt C", "opt D"]
-    correct_option = Column(String(1), nullable=True)  # "A" | "B" | "C" | "D"
-    marking_guide  = Column(Text, nullable=True)    # for AI grading of structured questions
+    options        = Column(Text, nullable=True)
+    correct_option = Column(String(1), nullable=True)
+    marking_guide  = Column(Text, nullable=True)
     order_index    = Column(Integer, default=0)
-    created_at     = Column(TIMESTAMP, server_default=func.now())
+
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
     exam = relationship("Exam", back_populates="questions")
 
@@ -224,7 +335,8 @@ class ExamSubmission(Base):
     id           = Column(Integer, primary_key=True, index=True)
     exam_id      = Column(Integer, ForeignKey("exams.id",  ondelete="CASCADE"), nullable=False)
     student_id   = Column(Integer, ForeignKey("users.id",  ondelete="CASCADE"), nullable=False)
-    status       = Column(Enum("submitted", "graded"), default="submitted")
+    status = Column(String(20), default="submitted")
+    #status       = Column(Enum("submitted", "graded"), default="submitted")
     total_score  = Column(Integer, nullable=True)
     submitted_at = Column(TIMESTAMP, server_default=func.now())
     graded_at    = Column(TIMESTAMP, nullable=True)
@@ -233,22 +345,24 @@ class ExamSubmission(Base):
     student = relationship("User", foreign_keys=[student_id])
     answers = relationship("ExamAnswer", back_populates="submission", cascade="all, delete-orphan")
 
+
 class ExamAnswer(Base):
     __tablename__ = "exam_answers"
 
-    id                 = Column(Integer, primary_key=True, index=True)
-    submission_id      = Column(Integer, ForeignKey("exam_submissions.id", ondelete="CASCADE"), nullable=False)
-    question_id        = Column(Integer, ForeignKey("exam_questions.id",   ondelete="CASCADE"), nullable=False)
-    answer_text        = Column(Text, nullable=True)
-    selected_option    = Column(String(1), nullable=True)
-    is_correct         = Column(Boolean, nullable=True)
-    score_awarded      = Column(Integer, nullable=True)
-    ai_feedback        = Column(Text, nullable=True)
-    created_at         = Column(TIMESTAMP, server_default=func.now())
+    id            = Column(Integer, primary_key=True, index=True)
+    submission_id = Column(Integer, ForeignKey("exam_submissions.id", ondelete="CASCADE"), nullable=False)
+    question_id   = Column(Integer, ForeignKey("exam_questions.id", ondelete="CASCADE"), nullable=False)
+
+    answer_text     = Column(Text, nullable=True)
+    selected_option = Column(String(1), nullable=True)
+    is_correct      = Column(Boolean, nullable=True)
+    score_awarded   = Column(Integer, nullable=True)
+    ai_feedback     = Column(Text, nullable=True)
+
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
     submission = relationship("ExamSubmission", back_populates="answers")
-    question   = relationship("ExamQuestion",   foreign_keys=[question_id])
-
+    question   = relationship("ExamQuestion", foreign_keys=[question_id])
 
 class GoogleClassroomToken(Base):
     __tablename__ = "google_classroom_tokens"
@@ -266,6 +380,7 @@ class GoogleClassroomToken(Base):
 
     teacher = relationship("User", foreign_keys=[teacher_id])
 
+
 class StudentGoogleToken(Base):
     __tablename__ = "student_google_tokens"
 
@@ -282,29 +397,14 @@ class StudentGoogleToken(Base):
     updated_at    = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
+class StudentMoodleToken(Base):
+    __tablename__ = "student_moodle_tokens"
 
+    id         = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    token      = Column(Text, nullable=False)
+    site_url   = Column(String(255), nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-
-
-
-class Quiz(Base):
-    __tablename__ = "quizzes"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True, index=True)
-    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
-    questions = Column(JSON, nullable=False)
-    moodle_quiz_id = Column(Integer, nullable=True)
-    moodle_course_id = Column(Integer, nullable=True)
-    time_limit_minutes = Column(Integer, nullable=True)
-    shuffle_questions = Column(Boolean, default=False)
-    shuffle_answers = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    moodle_assignment_id = Column(Integer, nullable=True)
-    moodle_course_id = Column(Integer, nullable=True)
-    synced_to_moodle = Column(Boolean, default=False)
-    
-    teacher = relationship("User", back_populates="quizzes")
+    student = relationship("User", foreign_keys=[student_id])
