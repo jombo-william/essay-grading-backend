@@ -320,6 +320,10 @@ def create_assignment(
 
     return {"success": True, "message": "Assignment created", "id": assignment.id}
 
+    #return {"success": True, "message": "Assignment created", "id": assignment.id}
+
+
+# ── POST /api/teacher/assignments/{assignment_id}/upload-reference ────────────
 
 @router.post("/assignments/{assignment_id}/upload-reference")
 async def upload_reference_material(
@@ -424,10 +428,77 @@ def update_assignment(
 
     return {"success": True, "message": "Assignment updated"}
 
+# ── POST /api/teacher/assignments/delete ─────────────────────────────────────
 
 class DeleteAssignmentRequest(BaseModel):
     id:         int
     csrf_token: Optional[str] = None
+
+
+@router.post("/assignments/delete")
+def delete_assignment(
+    body: DeleteAssignmentRequest,
+    x_csrf_token: Optional[str] = Header(default=None),
+    ctx: dict = Depends(require_teacher),
+):
+    user: models.User           = ctx["user"]
+    session: models.UserSession = ctx["session"]
+    db: Session                 = ctx["db"]
+
+    validate_csrf(session, x_csrf_token, body.csrf_token)
+
+    assignment = db.query(models.Assignment).filter(
+        models.Assignment.id         == body.id,
+        models.Assignment.teacher_id == user.id,
+    ).first()
+
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found or access denied")
+
+    # ── Delete from Google Classroom if linked ────────────────────────────────
+    if assignment.gc_coursework_id:
+        try:
+            from routes.google_classroom import get_credentials, get_gc_course_id_for_class
+            from googleapiclient.discovery import build
+
+            gc_course_id = get_gc_course_id_for_class(assignment.class_id, db)
+            if gc_course_id:
+                creds   = get_credentials(user.id, db)
+                service = build("classroom", "v1", credentials=creds)
+
+                # Google Classroom doesn't allow deleting published assignments,
+                # so we draft it first then delete
+                service.courses().courseWork().patch(
+                    courseId     = gc_course_id,
+                    id           = assignment.gc_coursework_id,
+                    updateMask   = "state",
+                    body         = {"state": "DRAFT"},
+                ).execute()
+
+                service.courses().courseWork().delete(
+                    courseId   = gc_course_id,
+                    id         = assignment.gc_coursework_id,
+                ).execute()
+
+                print(f"🗑️ Deleted assignment {assignment.gc_coursework_id} from Google Classroom")
+        except Exception as e:
+            # Don't block local delete if GC delete fails
+            print(f"⚠️ Could not delete from Google Classroom: {e}")
+
+    # ── Delete from local DB ──────────────────────────────────────────────────
+    db.query(models.Submission).filter(
+        models.Submission.assignment_id == assignment.id
+    ).delete()
+
+    db.delete(assignment)
+    db.commit()
+
+    print(f"🗑️ Assignment {body.id} deleted by teacher {user.id}")
+
+    return {"success": True, "message": "Assignment deleted successfully"}
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SUBMISSIONS  (filtered by class_id)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @router.post("/assignments/delete")
