@@ -96,17 +96,16 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 # MUST come only from .env
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 
-DATABASE_URL = (
-    os.getenv("DATABASE_URL")
-    or "postgresql://postgres.yyrqliklmlwvkkjhjfge:WJomBo.W%2F%40Tw2111@aws-1-eu-west-1.pooler.supabase.com:6543/postgres"
-)
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not configured. Add it to .env before starting the API.")
 
 print(f"🗄️  Connecting to Supabase DB...")
 
@@ -115,6 +114,7 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
+    connect_args={"connect_timeout": 10},
 )
 
 SessionLocal = sessionmaker(

@@ -1,27 +1,25 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
+from pathlib import Path
+from sqlalchemy.exc import SQLAlchemyError
 
 # =========================================================
 # LOAD ENVIRONMENT VARIABLES
 # =========================================================
-load_dotenv(
-    dotenv_path=r"C:\PROJECTS\FINAL YEAR PROJECT\essay-grading-backend\.env"
-)
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
-print("🔑 GEMINI_API_KEY loaded:", "YES" if os.getenv("GEMINI_API_KEY") else "NO")
-print("🔑 HF_API_KEY loaded:", "YES" if os.getenv("HF_API_KEY") else "NO")
-print("🗄️ DATABASE_URL:", os.getenv("DATABASE_URL"))
+print("GEMINI_API_KEY loaded:", "YES" if os.getenv("GEMINI_API_KEY") else "NO")
+print("HF_API_KEY loaded:", "YES" if os.getenv("HF_API_KEY") else "NO")
+print("DATABASE_URL configured:", "YES" if os.getenv("DATABASE_URL") else "NO")
 
 # =========================================================
 # DATABASE
 # =========================================================
 from database import engine
 import models
-
-# Create tables
-models.Base.metadata.create_all(bind=engine)
 
 # =========================================================
 # ROUTES
@@ -44,6 +42,20 @@ from routes.student_moodle import router as student_moodle_router
 # FASTAPI APP
 # =========================================================
 app = FastAPI(title="JomboEssayGrade API")
+
+
+@app.on_event("startup")
+def startup() -> None:
+    if os.getenv("AUTO_CREATE_TABLES", "false").lower() not in {"1", "true", "yes"}:
+        print("AUTO_CREATE_TABLES disabled; skipping database schema creation.")
+        return
+
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        print("Database tables checked/created.")
+    except SQLAlchemyError as exc:
+        print(f"Could not connect to the database during startup: {exc}")
+        print("API started anyway. Database-backed endpoints will fail until the DB is reachable.")
 
 # =========================================================
 # CORS
@@ -124,6 +136,11 @@ app.include_router(
     prefix="/api",
     tags=["Grading"]
 )
+app.include_router(
+    teacher.router,
+    prefix="/api/teacher",
+    tags=["Teacher"]
+)
 
 # =========================================================
 # ROOT
@@ -131,5 +148,5 @@ app.include_router(
 @app.get("/")
 def root():
     return {
-        "message": "JomboEssayGrade API is running ✅"
+        "message": "JomboEssayGrade API is running âœ…"
     }
