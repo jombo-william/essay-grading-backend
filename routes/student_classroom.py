@@ -46,7 +46,12 @@ STUDENT_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-CLIENT_SECRETS_FILE = "google_credentials.json"
+#CLIENT_SECRETS_FILE = "google_credentials.json"
+CLIENT_SECRETS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),  # routes/
+    "..",                                          # go up one level to backend root
+    "google_credentials.json"
+)
 REDIRECT_URI = os.getenv(
     "GOOGLE_STUDENT_REDIRECT_URI",
     "http://localhost:8000/api/student/auth/google/callback"
