@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 import requests as http_requests
@@ -55,9 +55,10 @@ def teacher_owns_class(db: Session, teacher_id: int, class_id: int) -> bool:
     ).first() is not None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 #  CLASSES
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ===============================================================================
 
 @router.get("/classes")
 def get_classes(ctx: dict = Depends(require_teacher)):
@@ -191,9 +192,12 @@ def unenroll_student(
     return {"success": True, "message": "Student removed from class."}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  ASSIGNMENTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ===============================================================================
+#  ASSIGNMENTS
+# ===============================================================================
 
 @router.get("/assignments")
 def get_assignments(
@@ -307,23 +311,19 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
 
-    # ── Also create in Google Classroom if class is linked ────────────────────
+    # â”€â”€ Also create in Google Classroom if class is linked â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         from routes.google_classroom import create_gc_assignment
         gc_id = create_gc_assignment(user.id, body.class_id, assignment, db)
         if gc_id:
             assignment.gc_coursework_id = gc_id
             db.commit()
-            print(f"✅ Assignment also created in Google Classroom: {gc_id}")
+            print(f"âœ… Assignment also created in Google Classroom: {gc_id}")
     except Exception as e:
-        print(f"⚠️ Google Classroom sync skipped: {e}")
+        print(f"âš ï¸ Google Classroom sync skipped: {e}")
 
     return {"success": True, "message": "Assignment created", "id": assignment.id}
 
-    #return {"success": True, "message": "Assignment created", "id": assignment.id}
-
-
-# ── POST /api/teacher/assignments/{assignment_id}/upload-reference ────────────
 
 @router.post("/assignments/{assignment_id}/upload-reference")
 async def upload_reference_material(
@@ -428,7 +428,6 @@ def update_assignment(
 
     return {"success": True, "message": "Assignment updated"}
 
-# ── POST /api/teacher/assignments/delete ─────────────────────────────────────
 
 class DeleteAssignmentRequest(BaseModel):
     id:         int
@@ -455,7 +454,6 @@ def delete_assignment(
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found or access denied")
 
-    # ── Delete from Google Classroom if linked ────────────────────────────────
     if assignment.gc_coursework_id:
         try:
             from routes.google_classroom import get_credentials, get_gc_course_id_for_class
@@ -466,26 +464,22 @@ def delete_assignment(
                 creds   = get_credentials(user.id, db)
                 service = build("classroom", "v1", credentials=creds)
 
-                # Google Classroom doesn't allow deleting published assignments,
-                # so we draft it first then delete
                 service.courses().courseWork().patch(
-                    courseId     = gc_course_id,
-                    id           = assignment.gc_coursework_id,
-                    updateMask   = "state",
-                    body         = {"state": "DRAFT"},
+                    courseId   = gc_course_id,
+                    id         = assignment.gc_coursework_id,
+                    updateMask = "state",
+                    body       = {"state": "DRAFT"},
                 ).execute()
 
                 service.courses().courseWork().delete(
-                    courseId   = gc_course_id,
-                    id         = assignment.gc_coursework_id,
+                    courseId = gc_course_id,
+                    id       = assignment.gc_coursework_id,
                 ).execute()
 
-                print(f"🗑️ Deleted assignment {assignment.gc_coursework_id} from Google Classroom")
+                print(f"ðŸ—‘ï¸ Deleted assignment {assignment.gc_coursework_id} from Google Classroom")
         except Exception as e:
-            # Don't block local delete if GC delete fails
-            print(f"⚠️ Could not delete from Google Classroom: {e}")
+            print(f"âš ï¸ Could not delete from Google Classroom: {e}")
 
-    # ── Delete from local DB ──────────────────────────────────────────────────
     db.query(models.Submission).filter(
         models.Submission.assignment_id == assignment.id
     ).delete()
@@ -493,12 +487,9 @@ def delete_assignment(
     db.delete(assignment)
     db.commit()
 
-    print(f"🗑️ Assignment {body.id} deleted by teacher {user.id}")
+    print(f"ðŸ—‘ï¸ Assignment {body.id} deleted by teacher {user.id}")
 
     return {"success": True, "message": "Assignment deleted successfully"}
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SUBMISSIONS  (filtered by class_id)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @router.post("/assignments/delete")
@@ -527,7 +518,7 @@ def delete_assignment(
             from routes.google_classroom import delete_gc_assignment
             gc_deleted = delete_gc_assignment(user.id, assignment.class_id, assignment.gc_coursework_id, db)
         except Exception as e:
-            print(f"⚠️ Could not delete from Google Classroom: {e}")
+            print(f"âš ï¸ Could not delete from Google Classroom: {e}")
 
     db.query(models.Submission).filter(
         models.Submission.assignment_id == assignment.id
@@ -544,7 +535,7 @@ def delete_assignment(
     if gc_deleted:
         msg += " Also removed from Google Classroom."
 
-    print(f"🗑️ Assignment {body.id} deleted by teacher {user.id}")
+    print(f"ðŸ—‘ï¸ Assignment {body.id} deleted by teacher {user.id}")
     return {"success": True, "message": msg, "gc_deleted": gc_deleted}
 
 
@@ -577,7 +568,7 @@ def archive_assignment(
     db.commit()
 
     action = "restored" if assignment.is_active else "archived"
-    print(f"📦 Assignment {body.id} {action} by teacher {user.id}")
+    print(f"ðŸ“¦ Assignment {body.id} {action} by teacher {user.id}")
     return {
         "success":   True,
         "message":   f"Assignment {action}.",
@@ -585,9 +576,12 @@ def archive_assignment(
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  SUBMISSIONS
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ===============================================================================
+#  SUBMISSIONS
+# ===============================================================================
 
 @router.get("/submissions")
 def get_submissions(
@@ -685,8 +679,6 @@ def get_pending_grading(
     return {"success": True, "submissions": submissions}
 
 
-# ── POST /api/teacher/submissions/grade ──────────────────────────────────────
-
 class GradeRequest(BaseModel):
     submission_id: int
     score:         int
@@ -736,9 +728,9 @@ def override_grade(
 
     db.commit()
 
-    print(f"✅ Teacher approved grade: {body.score}/{assignment.max_score} for submission {body.submission_id}")
+    print(f"âœ… Teacher approved grade: {body.score}/{assignment.max_score} for submission {body.submission_id}")
 
-    # ── Sync final grade back to Moodle if student is connected ──────────────
+    # â”€â”€ Sync final grade back to Moodle if student is connected â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         moodle_record = db.query(models.StudentMoodleToken).filter(
             models.StudentMoodleToken.student_id == submission.student_id
@@ -765,14 +757,14 @@ def override_grade(
                     "plugindata[assignfeedbackcomments_editor][format]": 1,
                 }
             )
-            print(f"✅ Grade synced to Moodle for student {submission.student_id}")
+            print(f"âœ… Grade synced to Moodle for student {submission.student_id}")
     except Exception as e:
-        print(f"⚠️  Moodle grade sync failed (non-blocking): {e}")
+        print(f"âš ï¸  Moodle grade sync failed (non-blocking): {e}")
 
     return {"success": True, "message": "Grade approved and released to student"}
 
 
-# ── POST /api/teacher/submissions/approve-all ─────────────────────────────────
+# â”€â”€ POST /api/teacher/submissions/approve-all â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ApproveAllRequest(BaseModel):
     class_id:   Optional[int] = None
@@ -797,6 +789,8 @@ def approve_all_grades(
         .filter(
             models.Assignment.teacher_id  == user.id,
             models.Submission.status      == "ai_graded",
+            models.Assignment.teacher_id == user.id,
+            models.Submission.status.in_(["submitted", "ai_graded"]),
             models.Submission.final_score == None,
             models.Submission.ai_score    != None,
         )
@@ -819,9 +813,9 @@ def approve_all_grades(
 
     db.commit()
 
-    print(f"✅ Teacher {user.id} approved {len(submissions)} AI grades (class_id={body.class_id})")
+    print(f"âœ… Teacher {user.id} approved {len(submissions)} AI grades (class_id={body.class_id})")
 
-    # ── Sync all approved grades back to Moodle ───────────────────────────────
+    # â”€â”€ Sync all approved grades back to Moodle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     synced_count = 0
     for sub in submissions:
         try:
@@ -856,11 +850,11 @@ def approve_all_grades(
                 )
                 synced_count += 1
         except Exception as e:
-            print(f"⚠️  Moodle sync failed for submission {sub.id}: {e}")
+            print(f"âš ï¸  Moodle sync failed for submission {sub.id}: {e}")
             continue
 
     if synced_count:
-        print(f"✅ Synced {synced_count} grades to Moodle")
+        print(f"âœ… Synced {synced_count} grades to Moodle")
 
     return {
         "success":  True,

@@ -1,4 +1,8 @@
 
+"""
+routes/google_classroom.py
+Google Classroom Integration
+"""
 import json
 import os
 import secrets
@@ -38,7 +42,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-#CLIENT_SECRETS_FILE = "google_credentials.json"
 CLIENT_SECRETS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),  # routes/
     "..",                                          # go up one level to backend root
@@ -50,6 +53,53 @@ REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI",
     "http://localhost:8000/api/teacher/auth/google/callback"
 )
+
+
+# ── Text cleaner: nukes all NUL bytes and characters PostgreSQL rejects ───────
+def clean_text(text: str) -> str:
+    if not text:
+        return ""
+    # Remove null bytes explicitly (PostgreSQL rejects U+0000 in text columns)
+    text = text.replace('\x00', '').replace('\u0000', '')
+    # Remove other non-printable characters, keeping newlines/tabs
+    text = ''.join(
+        ch for ch in text
+        if ch in '\n\r\t' or ord(ch) >= 32
+    )
+    # Round-trip through UTF-8 to strip lone surrogates and other invalid codepoints
+    text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+    return text.strip()
+
+
+def extract_doc_bytes(content: bytes) -> str:
+    """
+    Extract readable text from a legacy .doc binary file.
+    Tries python-docx first (works on many .doc files),
+    then falls back to a latin-1 decode + printable-line filter.
+    latin-1 is used because it maps bytes 1:1 and never produces NUL codepoints.
+    """
+    # Attempt 1 — python-docx (handles both .docx and some .doc files)
+    try:
+        import io
+        from docx import Document
+        doc = Document(io.BytesIO(content))
+        extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        if extracted.strip():
+            return extracted
+    except Exception:
+        pass
+
+    # Attempt 2 — latin-1 decode, keep only lines that look like real text
+    try:
+        text = content.decode("latin-1", errors="ignore")
+        lines = [
+            line for line in text.splitlines()
+            if len(line.strip()) > 3
+            and all(32 <= ord(c) < 127 or c in '\n\r\t' for c in line)
+        ]
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 # ── Helper: load saved credentials for a teacher ─────────────────────────────
@@ -325,7 +375,7 @@ def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, 
 
 # ── GET /api/teacher/auth/google/classroom ────────────────────────────────────
 @router.get("/auth/google/classroom")
-def start_google_auth(ctx: dict = Depends(require_teacher)):
+def start_google_auth(ctx: dict = Depends(require_teacher), db: Session = Depends(get_db)):
     if not GOOGLE_AVAILABLE:
         raise HTTPException(status_code=500, detail="Google packages not installed.")
 
@@ -354,7 +404,12 @@ def start_google_auth(ctx: dict = Depends(require_teacher)):
         code_challenge_method="S256",
     )
 
-    _code_verifiers[teacher_id] = code_verifier
+    existing = db.query(models.OAuthVerifier).filter_by(user_id=teacher_id).first()
+    if existing:
+        existing.code_verifier = code_verifier
+    else:
+        db.add(models.OAuthVerifier(user_id=teacher_id, code_verifier=code_verifier))
+    db.commit()
 
     print(f"🔗 Google auth URL generated for teacher {teacher_id}")
     return {"auth_url": auth_url, "state": state}
@@ -369,7 +424,12 @@ def google_callback(
 ):
     teacher_id = int(state)
 
-    code_verifier = _code_verifiers.pop(str(teacher_id), None)
+    row = db.query(models.OAuthVerifier).filter_by(user_id=str(teacher_id)).first()
+    code_verifier = row.code_verifier if row else None
+    if row:
+        db.delete(row)
+        db.commit()
+
     if not code_verifier:
         raise HTTPException(status_code=400, detail="OAuth session expired or invalid. Please try connecting again.")
 
@@ -406,7 +466,6 @@ def google_callback(
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
     return RedirectResponse(url=f"{frontend_url}?google_connected=true")
-
 
 # ── GET /api/teacher/classroom/courses ───────────────────────────────────────
 @router.get("/classroom/courses")
@@ -745,13 +804,43 @@ def import_and_grade(
                         fields = "mimeType, name"
                     ).execute()
                     mime = file_meta.get("mimeType", "")
+                    file_name = file_meta.get("name", "")
+
+                    print(f"📎 Processing file: {file_name} (mime: {mime})")
 
                     if mime == "application/vnd.google-apps.document":
+                        # Google Doc — export as plain text (always clean)
                         content = drive_svc.files().export(
                             fileId=file_id, mimeType="text/plain"
                         ).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
                     
+
+                    elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                        # .docx file — use python-docx for clean extraction
+                        content = drive_svc.files().get_media(fileId=file_id).execute()
+                        try:
+                            import io
+                            from docx import Document
+                            doc = Document(io.BytesIO(content))
+                            extracted = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                            essay_text += extracted
+                            print(f"✅ Extracted .docx text ({len(extracted)} chars)")
+                        except Exception as docx_err:
+                            print(f"⚠️ python-docx failed for {file_name}: {docx_err} — falling back")
+                            essay_text += content.decode("utf-8", errors="ignore")
+
+                    elif mime in (
+                        "application/msword",
+                        "application/vnd.ms-word",
+                        "application/x-msword",
+                    ):
+                        # Legacy .doc file — binary format, must be handled carefully
+                        content = drive_svc.files().get_media(fileId=file_id).execute()
+                        extracted = extract_doc_bytes(content)
+                        essay_text += extracted
+                        print(f"✅ Extracted legacy .doc text ({len(extracted)} chars)")
+
                     elif mime == "application/pdf":
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         try:
@@ -771,6 +860,7 @@ def import_and_grade(
                         except Exception as pdf_err:
                             print(f"⚠️ pypdf failed: {pdf_err}")
                             essay_text += content.decode("utf-8", errors="ignore")
+
                     elif "text" in mime:
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
@@ -787,13 +877,22 @@ def import_and_grade(
                             print(f"📄 Word doc extracted {len(essay_text)} chars")
                         except Exception as docx_err:
                             print(f"⚠️ Word doc extraction failed: {docx_err}")                   
+
                     else:
+                        # Unknown type — attempt utf-8 decode as last resort
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
 
                     print(f"✅ Read file {file_id} (type: {mime})")
+
                 except Exception as e:
                     print(f"⚠️ Could not read Drive file {file_id}: {e}")
+
+        # ── Clean extracted text before any DB interaction ────────────────
+        # This MUST happen before the essay_text.strip() check and before
+        # any DB save. clean_text removes NUL bytes that cause PostgreSQL
+        # "string literal cannot contain NUL" errors.
+        essay_text = clean_text(essay_text)
 
         if not essay_text.strip():
             results.append({
@@ -816,31 +915,32 @@ def import_and_grade(
                 word_count=word_count,
             )
 
-            # ── Save to DB ────────────────────────────────────────────────
+            # ── Save to DB — always clean text slice before saving ────────
+            safe_essay = clean_text(essay_text)[:5000]
+
             existing_sub = db.query(models.Submission).filter(
                 models.Submission.assignment_id == assignment.id,
                 models.Submission.file_name     == f"gc_{gc_uid}",
             ).first()
 
             if existing_sub:
-                existing_sub.essay_text         = essay_text[:5000]
+                existing_sub.essay_text         = safe_essay
                 existing_sub.ai_score           = grade["score"]
                 existing_sub.ai_feedback        = grade["feedback"]
                 existing_sub.ai_detection_score = 0
                 existing_sub.status             = "ai_graded"
                 db.commit()
-                # Mark this student as already graded
                 if existing_sub.student_id:
                     gc_graded_student_ids.add(existing_sub.student_id)
 
             elif actual_student_id:
-                gc_graded_student_ids.add(actual_student_id)  # ← mark before saving
+                gc_graded_student_ids.add(actual_student_id)
                 check = db.query(models.Submission).filter_by(
                     assignment_id = assignment.id,
                     student_id    = actual_student_id,
                 ).first()
                 if check:
-                    check.essay_text         = essay_text[:5000]
+                    check.essay_text         = safe_essay
                     check.ai_score           = grade["score"]
                     check.ai_feedback        = grade["feedback"]
                     check.ai_detection_score = 0
@@ -850,7 +950,7 @@ def import_and_grade(
                     db.add(models.Submission(
                         assignment_id      = assignment.id,
                         student_id         = actual_student_id,
-                        essay_text         = essay_text[:5000],
+                        essay_text         = safe_essay,
                         submit_mode        = "upload",
                         file_name          = f"gc_{gc_uid}",
                         ai_score           = grade["score"],
@@ -1020,8 +1120,6 @@ def link_google_course(
 
     return {"success": True, "message": "Google Classroom course linked to class."}
 
-   # return {"success": True, "message": "Google Classroom course linked to class."}
-
 
 # ── POST /api/teacher/classroom/courses/{course_id}/enroll-students ──────────
 @router.post("/classroom/courses/{course_id}/enroll-students")
@@ -1114,7 +1212,7 @@ def enroll_gc_students(
     }
 
 
-    # ── POST /api/teacher/classroom/courses/{course_id}/sync ─────────────────────
+# ── POST /api/teacher/classroom/courses/{course_id}/sync ─────────────────────
 @router.post("/classroom/courses/{course_id}/sync")
 def sync_gc_course(
     course_id:      str,
