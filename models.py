@@ -1,7 +1,3 @@
-
-#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
-
-#from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -15,9 +11,7 @@ class User(Base):
     name                = Column(String(100), nullable=False)
     email               = Column(String(150), unique=True, nullable=False)
     password            = Column(String(255), nullable=False)
-    #role                = Column(Enum("teacher", "student"), nullable=False)
-    role = Column(String(20), nullable=False)
-    #role = Column(Enum("teacher", "student", name="user_role"), nullable=False)
+    role                = Column(String(20), nullable=False)  # "teacher" or "student"
     registration_number = Column(String(50), nullable=True)
     phone               = Column(String(20), nullable=True)
     is_active           = Column(Boolean, default=True)
@@ -26,7 +20,6 @@ class User(Base):
 
     teacher_classes = relationship("TeacherClass", back_populates="teacher", cascade="all, delete-orphan")
     enrollments = relationship("ClassEnrollment", back_populates="student", cascade="all, delete-orphan")
-
     assignments = relationship("Assignment", back_populates="teacher")
     submissions = relationship("Submission", back_populates="student")
     sessions    = relationship("UserSession", back_populates="user")
@@ -113,12 +106,12 @@ class Assignment(Base):
 
     is_active          = Column(Boolean, default=True)
     gc_coursework_id   = Column(String(100), nullable=True)
-    moodle_assignment_id = Column(Integer, nullable=True)
+    moodle_assignment_id = Column(String(100), nullable=True)
     moodle_course_id     = Column(Integer, nullable=True)
     moodle_site_url      = Column(String(255), nullable=True)
-
-    created_at = Column(TIMESTAMP, server_default=func.now())
-    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    
+    created_at         = Column(TIMESTAMP, server_default=func.now())
+    updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     teacher     = relationship("User", back_populates="assignments")
     cls         = relationship("Class", back_populates="assignments")
@@ -145,10 +138,9 @@ class Submission(Base):
 
     id                 = Column(Integer, primary_key=True, index=True)
     assignment_id      = Column(Integer, ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False)
-    student_id         = Column(Integer, ForeignKey("users.id",       ondelete="CASCADE"), nullable=False)
+    student_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     essay_text         = Column(Text, nullable=False)
-    submit_mode = Column(String(20), default="write")
-    #submit_mode        = Column(Enum("write", "upload"), default="write")
+    submit_mode        = Column(String(20), default="write")  # "write" or "upload"
     file_name          = Column(String(255), nullable=True)
     file_path          = Column(String(500), nullable=True)
     ai_score           = Column(Integer, nullable=True)
@@ -158,29 +150,14 @@ class Submission(Base):
     final_score        = Column(Integer, nullable=True)
     teacher_feedback   = Column(Text, nullable=True)
     graded_at          = Column(TIMESTAMP, nullable=True)
-    status = Column(String(20), default="pending")
-    #status             = Column(Enum("pending", "submitted", "ai_graded", "graded"), default="pending")
+    status             = Column(String(20), default="pending")  # "pending", "submitted", "ai_graded", "graded"
     submitted_at       = Column(TIMESTAMP, server_default=func.now())
     updated_at         = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
-    # In models.py add these two columns to your Assignment model
-    moodle_assignment_id = Column(Integer, nullable=True)
-    moodle_course_id     = Column(Integer, nullable=True)
-
-    # final_score      = Column(Integer, nullable=True)
-    # teacher_feedback = Column(Text, nullable=True)
-    # graded_at        = Column(TIMESTAMP, nullable=True)
-
-    # status = Column(
-    #     Enum("pending", "submitted", "ai_graded", "graded", name="submission_status_enum"),
-    #     default="pending"
-    # )
-
-    # submitted_at = Column(TIMESTAMP, server_default=func.now())
-    # updated_at   = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     assignment   = relationship("Assignment", back_populates="submissions")
     student      = relationship("User", back_populates="submissions")
     ai_detection = relationship("AIDetectionLog", back_populates="submission", uselist=False)
+    chat_messages = relationship("ChatMessage", back_populates="submission", cascade="all, delete-orphan")
 
 
 class AIDetectionLog(Base):
@@ -195,6 +172,7 @@ class AIDetectionLog(Base):
     detected_at     = Column(TIMESTAMP, server_default=func.now())
 
     submission = relationship("Submission", back_populates="ai_detection")
+
 
 class Quiz(Base):
     __tablename__ = "quizzes"
@@ -229,7 +207,7 @@ class QuizQuestion(Base):
     id             = Column(Integer, primary_key=True, index=True)
     quiz_id        = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
 
-    type           = Column(String(20), nullable=False)  # mcq / structured
+    type           = Column(String(20), nullable=False)  # "mcq" or "structured"
     prompt         = Column(Text, nullable=False)
     marks          = Column(Integer, default=1)
 
@@ -242,7 +220,7 @@ class QuizQuestion(Base):
     created_at     = Column(TIMESTAMP, server_default=func.now())
 
     quiz    = relationship("Quiz", back_populates="questions")
-    answers = relationship("QuizAnswer", back_populates="question")
+    answers = relationship("QuizAnswer", back_populates="question", cascade="all, delete-orphan")
 
 
 class QuizAttempt(Base):
@@ -252,7 +230,7 @@ class QuizAttempt(Base):
     quiz_id           = Column(Integer, ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
     student_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
-    status            = Column(String(20), default="submitted")
+    status            = Column(String(20), default="submitted")  # "submitted", "graded"
     total_score       = Column(Integer, nullable=True)
     max_score         = Column(Integer, nullable=True)
 
@@ -286,6 +264,8 @@ class QuizAnswer(Base):
 
     attempt  = relationship("QuizAttempt", back_populates="answers")
     question = relationship("QuizQuestion", back_populates="answers")
+
+
 class Exam(Base):
     __tablename__ = "exams"
 
@@ -304,9 +284,9 @@ class Exam(Base):
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
-    teacher    = relationship("User", foreign_keys=[teacher_id])
-    cls        = relationship("Class", foreign_keys=[class_id])
-    questions  = relationship("ExamQuestion", back_populates="exam", cascade="all, delete-orphan")
+    teacher     = relationship("User", foreign_keys=[teacher_id])
+    cls         = relationship("Class", foreign_keys=[class_id])
+    questions   = relationship("ExamQuestion", back_populates="exam", cascade="all, delete-orphan")
     submissions = relationship("ExamSubmission", back_populates="exam", cascade="all, delete-orphan")
 
 
@@ -315,8 +295,7 @@ class ExamQuestion(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     exam_id        = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
-    type = Column(String(20), nullable=False)
-    #type           = Column(Enum("mcq", "structured"), nullable=False)
+    type           = Column(String(20), nullable=False)  # "mcq" or "structured"
     prompt         = Column(Text, nullable=False)
     marks          = Column(Integer, default=1)
     options        = Column(Text, nullable=True)
@@ -333,10 +312,9 @@ class ExamSubmission(Base):
     __tablename__ = "exam_submissions"
 
     id           = Column(Integer, primary_key=True, index=True)
-    exam_id      = Column(Integer, ForeignKey("exams.id",  ondelete="CASCADE"), nullable=False)
-    student_id   = Column(Integer, ForeignKey("users.id",  ondelete="CASCADE"), nullable=False)
-    status = Column(String(20), default="submitted")
-    #status       = Column(Enum("submitted", "graded"), default="submitted")
+    exam_id      = Column(Integer, ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
+    student_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status       = Column(String(20), default="submitted")  # "submitted", "graded"
     total_score  = Column(Integer, nullable=True)
     submitted_at = Column(TIMESTAMP, server_default=func.now())
     graded_at    = Column(TIMESTAMP, nullable=True)
@@ -363,6 +341,7 @@ class ExamAnswer(Base):
 
     submission = relationship("ExamSubmission", back_populates="answers")
     question   = relationship("ExamQuestion", foreign_keys=[question_id])
+
 
 class GoogleClassroomToken(Base):
     __tablename__ = "google_classroom_tokens"
@@ -395,6 +374,8 @@ class StudentGoogleToken(Base):
     gc_user_id    = Column(String(100), nullable=True)
     created_at    = Column(DateTime, default=func.now())
     updated_at    = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    student = relationship("User", foreign_keys=[student_id])
 
 
 class StudentMoodleToken(Base):
@@ -408,3 +389,18 @@ class StudentMoodleToken(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     student = relationship("User", foreign_keys=[student_id])
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    submission_id = Column(Integer, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
+    sender_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    sender_role   = Column(String(20), nullable=False)  # "teacher" or "student"
+    sender_name   = Column(String(100), nullable=False)
+    message       = Column(Text, nullable=False)
+    created_at    = Column(TIMESTAMP, server_default=func.now())
+
+    submission = relationship("Submission", back_populates="chat_messages")
+    sender     = relationship("User", foreign_keys=[sender_id])

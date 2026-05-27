@@ -1,6 +1,4 @@
-
-from re import sub
-
+import re
 import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -11,7 +9,7 @@ import models
 import json
 import asyncio
 import time
-import re as _re
+from datetime import datetime
 
 router = APIRouter()
 
@@ -76,7 +74,8 @@ def get_moodle_courses(
     site_info = moodle_call(
         token    = moodle_token,
         function = "core_webservice_get_site_info",
-        params   = {}
+        params   = {},
+        site_url = site_url
     )
 
     user_id = site_info.get("userid")
@@ -89,7 +88,8 @@ def get_moodle_courses(
     data = moodle_call(
         token    = moodle_token,
         function = "core_enrol_get_users_courses",
-        params   = {"userid": user_id}
+        params   = {"userid": user_id},
+        site_url = site_url
     )
 
     print(f"📚 Raw Moodle courses: {data}")
@@ -216,15 +216,190 @@ class MoodleAutoGradeRequest(BaseModel):
     local_assignment_id:  int
 
 
+class MoodleQuizGradeRequest(BaseModel):
+    moodle_token:         str
+    quiz_id:              int
+    course_id:            int
+    local_assignment_id:  int
+
+
+def create_moodle_assignment_from_local(
+    moodle_token: str,
+    course_id: int,
+    assignment: models.Assignment
+) -> Optional[str]:
+    """
+    Create an assignment in Moodle from a local assignment object.
+    Returns the Moodle assignment ID if successful, None otherwise.
+    """
+    try:
+        # Prepare assignment data
+        params = {
+            "courseid": course_id,
+            "name": assignment.title,
+            "description": assignment.description or "",
+            "intro": assignment.instructions or "",
+            "grade": float(assignment.max_score),
+            "grademax": float(assignment.max_score),
+            "grademin": 0.0,
+            "gradingmethod": "simple",
+        }
+        
+        # Add due date if available
+        if assignment.due_date:
+            if isinstance(assignment.due_date, datetime):
+                params["duedate"] = int(assignment.due_date.timestamp())
+        
+        data = moodle_call(
+            token    = moodle_token,
+            function = "mod_assign_add_assignment",
+            params   = params
+        )
+        
+        # The response should contain the assignment ID
+        # Based on Moodle docs, mod_assign_add_assignment returns the assignment ID
+        if isinstance(data, dict) and "id" in data:
+            return str(data["id"])
+        elif isinstance(data, int):
+            return str(data)
+        else:
+            # Try to extract ID from response
+            return str(data) if data else None
+            
+    except Exception as e:
+        print(f"⚠️ Moodle assignment creation failed: {e}")
+        return None
+
+
+# ── POST /api/teacher/moodle/create-assignment ────────────────────────────────────
 class MoodleCreateAssignmentRequest(BaseModel):
-    moodle_token:        str
-    course_id:           int
-    name:                str
-    instructions:        str
-    due_date:            Optional[int] = None
-    max_grade:           Optional[int] = 100
-    local_assignment_id: int
-    site_url:            str = DEFAULT_MOODLE_URL
+    moodle_token: str
+    course_id: int
+    name: str  # Assignment name
+    description: str = ""  # Assignment description (summary)
+    intro: str = ""  # Assignment introduction
+    duedate: Optional[int] = None  # Due date as UNIX timestamp
+    allowsubmissionsfromdate: Optional[int] = None  # Allow submissions from date
+    grade: float = 100.0  # Grade
+    grademax: float = 100.0  # Maximum grade
+    grademin: float = 0.0  # Minimum grade
+    gradingmethod: str = "simple"  # grading method: simple, markingguide, rubric
+
+
+@router.post("/moodle/create-assignment")
+def create_moodle_assignment(
+    body: MoodleCreateAssignmentRequest,
+    ctx: dict = Depends(require_teacher)
+):
+    """Create an assignment in Moodle."""
+    # Convert datetime objects to UNIX timestamp if needed
+    params = {
+        "courseid": body.course_id,
+        "name": body.name,
+        "description": body.description,
+        "intro": body.intro,
+        "grade": body.grade,
+        "grademax": body.grademax,
+        "grademin": body.grademin,
+        "gradingmethod": body.gradingmethod,
+    }
+    
+    # Add optional date parameters if provided
+    if body.duedate is not None:
+        params["duedate"] = body.duedate
+    if body.allowsubmissionsfromdate is not None:
+        params["allowsubmissionsfromdate"] = body.allowsubmissionsfromdate
+    
+    data = moodle_call(
+        token    = body.moodle_token,
+        function = "mod_assign_add_assignment",
+        params   = params
+    )
+    
+    return {"success": True, "assignment": data}
+
+
+# ── POST /api/teacher/moodle/import-assignment ────────────────────────────────────
+class MoodleImportAssignmentRequest(BaseModel):
+    moodle_token: str
+    moodle_assignment_id: int
+    class_id: int
+    title: Optional[str] = None  # If not provided, uses Moodle assignment name
+    instructions: Optional[str] = None  # If not provided, uses Moodle assignment intro/summary
+    reference_material: Optional[str] = None
+    max_score: Optional[int] = None  # If not provided, uses Moodle grade
+
+
+@router.post("/moodle/import-assignment")
+def import_moodle_assignment(
+    body: MoodleImportAssignmentRequest,
+    ctx: dict = Depends(require_teacher)
+):
+    """Import an assignment from Moodle as a local assignment."""
+    from routes.teacher import teacher_owns_class
+    from database import get_db
+    from sqlalchemy.orm import Session
+    
+    # Verify teacher owns the class
+    db: Session = next(get_db())
+    user: models.User = ctx["user"]
+    
+    if not teacher_owns_class(db, user.id, body.class_id):
+        raise HTTPException(status_code=403, detail="Not authorized to create assignments in this class")
+    
+    # Get assignment details from Moodle
+    moodle_data = moodle_call(
+        token    = body.moodle_token,
+        function = "mod_assign_get_assignments",
+        params   = {"assignmentids[0]": body.moodle_assignment_id}
+    )
+    
+    # Extract assignment info
+    assignments = moodle_data.get("assignments", [])
+    if not assignments:
+        raise HTTPException(status_code=404, detail="Moodle assignment not found")
+    
+    moodle_assignment = assignments[0]
+    
+    # Use provided values or fall back to Moodle values
+    title = body.title or moodle_assignment.get("name", "Imported Assignment")
+    instructions = body.instructions or moodle_assignment.get("intro", "") or moodle_assignment.get("summary", "")
+    reference_material = body.reference_material or ""
+    max_score = body.max_score or int(float(moodle_assignment.get("grade", 100)))
+    
+    # Get due date if available
+    due_date = None
+    if moodle_assignment.get("duedate"):
+        try:
+            due_date = datetime.fromtimestamp(int(moodle_assignment["duedate"]))
+        except (ValueError, TypeError):
+            due_date = datetime.now()
+    
+    # Create local assignment
+    assignment = models.Assignment(
+        teacher_id         = user.id,
+        class_id           = body.class_id,
+        title              = title,
+        instructions       = instructions,
+        reference_material = reference_material,
+        max_score          = max_score,
+        due_date           = due_date or datetime.now(),  # Default to now if no due date
+        rubric             = None,  # No rubric imported from Moodle by default
+        moodle_assignment_id = str(body.moodle_assignment_id),
+    )
+    
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+    
+    return {
+        "success": True,
+        "assignment": {
+            "id": assignment.id,
+            "title": assignment.title,
+            "moodle_assignment_id": assignment.moodle_assignment_id
+        }
+    }
 
 
 # ── POST /api/teacher/moodle/autograde ───────────────────────────────────
@@ -246,18 +421,11 @@ def autograde_moodle(
     if not assignment:
         raise HTTPException(status_code=404, detail="Local assignment not found")
 
-    # subs_data = moodle_call(
-    #     token    = body.moodle_token,
-    #     function = "mod_assign_get_submissions",
-    #     params   = {"assignmentids[0]": body.moodle_assignment_id},
-    #     site_url = body.site_url
-    # )
-
     subs_data = moodle_call(
         token    = body.moodle_token,
         function = "mod_assign_get_submissions",
         params   = {"assignmentids[0]": body.moodle_assignment_id},
-        site_url = body.site_url
+        site_url = DEFAULT_MOODLE_URL
     )
 
     # fetch enrolled users to resolve userid → fullname
@@ -265,7 +433,7 @@ def autograde_moodle(
         token    = body.moodle_token,
         function = "mod_assign_get_participants",
         params   = {"assignid": body.moodle_assignment_id},
-        site_url = body.site_url
+        site_url = DEFAULT_MOODLE_URL
     )
     user_names = {
         u["id"]: u.get("fullname", f"User {u['id']}")
@@ -280,10 +448,8 @@ def autograde_moodle(
 
         for sub in all_subs:
             sub_status = sub.get("status", "unknown")
-           #userid     = sub.get("userid")
             userid     = sub.get("userid")
             username   = user_names.get(userid) or f"User {userid}"
-            #username   = sub.get("fullname") or sub.get("userfullname") or f"User {userid}"
             plugins    = [p.get("type") for p in sub.get("plugins", [])]
             print(f"DEBUG sub userid={userid} status={repr(sub_status)} plugins={plugins}")
 
@@ -304,7 +470,6 @@ def autograde_moodle(
                         essay_text += field.get("text", "")
 
             # Strip HTML tags if present
-            import re
             essay_text = re.sub(r"<[^>]+>", " ", essay_text).strip()
 
             if not essay_text:
@@ -341,7 +506,7 @@ def autograde_moodle(
                         "plugindata[assignfeedbackcomments_editor][text]":   grade["feedback"],
                         "plugindata[assignfeedbackcomments_editor][format]": 1,
                     },
-                    site_url = body.site_url
+                    site_url = DEFAULT_MOODLE_URL
                 )
 
                 print(f"✅ Graded {student_name} → {grade['score']}/{assignment.max_score}")
@@ -382,7 +547,6 @@ async def autograde_moodle_quiz(
     ctx: dict = Depends(require_teacher)
 ):
     from services.grader import grade_essay
-    import re
 
     user = ctx["user"]
     db   = ctx["db"]
@@ -398,7 +562,7 @@ async def autograde_moodle_quiz(
         token    = body.moodle_token,
         function = "core_enrol_get_enrolled_users",
         params   = {"courseid": body.course_id},
-        site_url = body.site_url
+        site_url = DEFAULT_MOODLE_URL
     )
 
     results = []
@@ -419,7 +583,7 @@ async def autograde_moodle_quiz(
                 "status":          "finished",
                 "includepreviews": 0
             },
-            site_url = body.site_url
+            site_url = DEFAULT_MOODLE_URL
         )
 
         attempts = attempts_data.get("attempts", [])
@@ -434,7 +598,7 @@ async def autograde_moodle_quiz(
                 token    = body.moodle_token,
                 function = "mod_quiz_get_attempt_review",
                 params   = {"attemptid": attempt_id, "page": -1},
-                site_url = body.site_url
+                site_url = DEFAULT_MOODLE_URL
             )
         except Exception as e:
             results.append({
