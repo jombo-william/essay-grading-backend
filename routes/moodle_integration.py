@@ -14,7 +14,7 @@ import re as _re
 
 router = APIRouter()
 
-DEFAULT_MOODLE_URL = "https://essaygrade.moodlecloud.com"
+DEFAULT_MOODLE_URL = "https://essaygrade2.moodlecloud.com"
 
 
 def moodle_call(token: str, function: str, params: dict, site_url: str = DEFAULT_MOODLE_URL):
