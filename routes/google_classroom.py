@@ -1,5 +1,3 @@
-
-
 """
 routes/google_classroom.py
 Google Classroom Integration
@@ -35,8 +33,8 @@ except ImportError:
 
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.students",      # create/edit assignments
-    "https://www.googleapis.com/auth/classroom.coursework.me",            # student submissions
+    "https://www.googleapis.com/auth/classroom.coursework.students",
+    "https://www.googleapis.com/auth/classroom.coursework.me",
     "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
    #"https://www.googleapis.com/auth/classroom.grades",
     "https://www.googleapis.com/auth/classroom.rosters.readonly",
@@ -44,12 +42,18 @@ SCOPES = [
 ]
 
 CLIENT_SECRETS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),  # routes/
-    "..",                                          # go up one level to backend root
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
     "google_credentials.json"
 )
+
+# ── FIXED: guard getsize so missing file doesn't crash startup ────────────────
 print(f"📄 Creds path: {os.path.abspath(CLIENT_SECRETS_FILE)}")
-print(f"📄 Size: {os.path.getsize(CLIENT_SECRETS_FILE)} bytes")
+if os.path.exists(CLIENT_SECRETS_FILE):
+    print(f"📄 Size: {os.path.getsize(CLIENT_SECRETS_FILE)} bytes")
+else:
+    print(f"⚠️  google_credentials.json NOT FOUND — Google Classroom features will be unavailable")
+
 REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI",
     "http://localhost:8000/api/teacher/auth/google/callback"
@@ -60,14 +64,11 @@ REDIRECT_URI = os.getenv(
 def clean_text(text: str) -> str:
     if not text:
         return ""
-    # Remove null bytes explicitly (PostgreSQL rejects U+0000 in text columns)
     text = text.replace('\x00', '').replace('\u0000', '')
-    # Remove other non-printable characters, keeping newlines/tabs
     text = ''.join(
         ch for ch in text
         if ch in '\n\r\t' or ord(ch) >= 32
     )
-    # Round-trip through UTF-8 to strip lone surrogates and other invalid codepoints
     text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
     return text.strip()
 
@@ -77,9 +78,7 @@ def extract_doc_bytes(content: bytes) -> str:
     Extract readable text from a legacy .doc binary file.
     Tries python-docx first (works on many .doc files),
     then falls back to a latin-1 decode + printable-line filter.
-    latin-1 is used because it maps bytes 1:1 and never produces NUL codepoints.
     """
-    # Attempt 1 — python-docx (handles both .docx and some .doc files)
     try:
         import io
         from docx import Document
@@ -90,7 +89,6 @@ def extract_doc_bytes(content: bytes) -> str:
     except Exception:
         pass
 
-    # Attempt 2 — latin-1 decode, keep only lines that look like real text
     try:
         text = content.decode("latin-1", errors="ignore")
         lines = [
@@ -130,91 +128,6 @@ def get_gc_course_id_for_class(class_id: int, db: Session):
     return cls.gc_course_id if cls else None
 
 
-
-
-# def sync_gc_students_to_db(course_id: str, service, db) -> dict:
-#     """
-#     Fetch all students from a Google Classroom course and create
-#     local accounts for them if they don't exist yet.
-#     Returns a dict of {gc_user_id: local_student_id}
-#     """
-#     import secrets
-#     from passlib.context import CryptContext
-#     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-#     try:
-#         result = service.courses().students().list(courseId=course_id).execute()
-#         gc_students = result.get("students", [])
-#         print(f"👥 Found {len(gc_students)} students in Google Classroom")
-#     except Exception as e:
-#         print(f"⚠️ Could not fetch students: {e}")
-#         return {}
-
-#     gc_id_to_local = {}
-
-#     for gs in gc_students:
-#         profile   = gs.get("profile", {})
-#         gc_uid    = gs.get("userId", "")
-#         name      = profile.get("name", {}).get("fullName", "Unknown Student")
-#         email     = profile.get("emailAddress", f"{gc_uid}@classroom.google.com")
-
-#         if not gc_uid:
-#             continue
-
-#         # Check if already linked
-#         token_row = db.query(models.StudentGoogleToken).filter_by(
-#             gc_user_id=gc_uid
-#         ).first()
-
-#         if token_row:
-#             gc_id_to_local[gc_uid] = token_row.student_id
-#             continue
-
-#         # Check if user with this email already exists
-#         existing_user = db.query(models.User).filter_by(email=email).first()
-
-#         if existing_user:
-#             student_id = existing_user.id
-#         else:
-#             # Create new student account
-#             random_password = secrets.token_urlsafe(16)
-#             hashed          = pwd_context.hash(random_password)
-#             # new_user = models.User(
-#             #     name     = name,
-#             #     email    = email,
-#             #     password = hashed,
-#             #     role     = "student",
-#             # )
-#             from sqlalchemy import text
-
-#             # Insert user via raw SQL to avoid PostgreSQL ENUM compile error
-#             db.execute(
-#                 text("INSERT INTO users (name, email, password, role) VALUES (:name, :email, :password, 'student')"),
-#                 {"name": name, "email": email, "password": hashed}
-#             )
-#             db.flush()
-
-#             # Get the newly created user
-#             new_user = db.query(models.User).filter_by(email=email).first()
-#             student_id = new_user.id
-#             print(f"✅ Created student account: {name} ({email})")
-                
-
-#         if not existing_token:
-#             db.add(models.StudentGoogleToken(
-#                 student_id    = student_id,
-#                 access_token  = "gc_sync",
-#                 refresh_token = None,
-#                 gc_user_id    = gc_uid,
-#             ))
-
-#         gc_id_to_local[gc_uid] = student_id
-
-#     db.commit()
-#     print(f"✅ Synced {len(gc_id_to_local)} students to local DB")
-#     return gc_id_to_local
-
-
 def sync_gc_students_to_db(course_id: str, service, db) -> dict:
     import secrets
     from passlib.context import CryptContext
@@ -240,19 +153,16 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
         if not gc_uid:
             continue
 
-        # Check if already linked
         token_row = db.query(models.StudentGoogleToken).filter_by(gc_user_id=gc_uid).first()
         if token_row:
             gc_id_to_local[gc_uid] = token_row.student_id
             continue
 
-        # Check if user with this email already exists
         existing_user = db.query(models.User).filter_by(email=email).first()
 
         if existing_user:
             student_id = existing_user.id
         else:
-            # Insert via raw SQL to bypass PostgreSQL ENUM compile error
             random_password = secrets.token_urlsafe(16)
             hashed = pwd_context.hash(random_password)
             db.execute(
@@ -264,7 +174,6 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
             student_id = new_user.id
             print(f"✅ Created student account: {name} ({email})")
 
-        # Link gc_user_id to local student
         existing_token = db.query(models.StudentGoogleToken).filter_by(student_id=student_id).first()
         if not existing_token:
             db.add(models.StudentGoogleToken(
@@ -281,13 +190,11 @@ def sync_gc_students_to_db(course_id: str, service, db) -> dict:
     return gc_id_to_local
 
 
-
-
 def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session):
     """Create an assignment in Google Classroom and return the coursework ID."""
     gc_course_id = get_gc_course_id_for_class(class_id, db)
     if not gc_course_id:
-        return None  # class not linked, skip silently
+        return None
 
     try:
         creds   = get_credentials(teacher_id, db)
@@ -318,16 +225,11 @@ def create_gc_assignment(teacher_id: int, class_id: int, assignment, db: Session
             body=coursework_body
         ).execute()
 
-        return result.get("id")  # gc_coursework_id
+        return result.get("id")
 
     except Exception as e:
         print(f"⚠️ Could not create Google Classroom assignment: {e}")
         return None
-
-
-    # ── ADD THIS FUNCTION to routes/google_classroom.py ──────────────────────────
-
-
 
 
 def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, db) -> bool:
@@ -339,7 +241,6 @@ def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, 
         creds   = get_credentials(teacher_id, db)
         service = build("classroom", "v1", credentials=creds)
 
-        # Step 1 — check current state
         try:
             cw = service.courses().courseWork().get(
                 courseId=gc_course_id,
@@ -348,10 +249,9 @@ def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, 
         except Exception as e:
             if "404" in str(e):
                 print(f"ℹ️ Coursework {gc_coursework_id} not found in Google Classroom — already deleted")
-                return True  # not an error, just not there
-            raise  # re-raise other errors
+                return True
+            raise
 
-        # Step 2 — patch to DRAFT first if PUBLISHED
         if cw.get("state") != "DRAFT":
             service.courses().courseWork().patch(
                 courseId=gc_course_id,
@@ -361,7 +261,6 @@ def delete_gc_assignment(teacher_id: int, class_id: int, gc_coursework_id: str, 
             ).execute()
             print(f"📝 Set coursework {gc_coursework_id} to DRAFT")
 
-        # Step 3 — now delete
         service.courses().courseWork().delete(
             courseId=gc_course_id,
             id=gc_coursework_id,
@@ -468,6 +367,7 @@ def google_callback(
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
     return RedirectResponse(url=f"{frontend_url}?google_connected=true")
 
+
 # ── GET /api/teacher/classroom/courses ───────────────────────────────────────
 @router.get("/classroom/courses")
 def get_courses(ctx: dict = Depends(require_teacher)):
@@ -530,7 +430,8 @@ def get_course_assignments(
         ]
     }
 
-# ── ADD HERE ──────────────────────────────────────────────────────────────────
+
+# ── GET /api/teacher/classroom/debug-coursework/{course_id}/{cw_id} ──────────
 @router.get("/classroom/debug-coursework/{course_id}/{cw_id}")
 def debug_coursework(
     course_id: str,
@@ -562,7 +463,6 @@ def sync_gc_assignments(
     user: models.User = ctx["user"]
     db:   Session     = ctx["db"]
 
-    # Find the local class linked to this gc_course_id
     cls = db.query(models.Class).filter_by(gc_course_id=course_id).first()
     if not cls:
         raise HTTPException(
@@ -573,7 +473,6 @@ def sync_gc_assignments(
     creds   = get_credentials(user.id, db)
     service = build("classroom", "v1", credentials=creds)
 
-    # Fetch all coursework from Google Classroom
     result = service.courses().courseWork().list(
         courseId=course_id
     ).execute()
@@ -587,7 +486,6 @@ def sync_gc_assignments(
     for gca in gc_assignments:
         gc_cw_id = gca.get("id")
 
-        # Skip if already in our DB
         existing = db.query(models.Assignment).filter_by(
             gc_coursework_id=gc_cw_id
         ).first()
@@ -595,7 +493,6 @@ def sync_gc_assignments(
             skipped += 1
             continue
 
-        # Parse due date
         due_date = None
         if "dueDate" in gca and "dueTime" in gca:
             d = gca["dueDate"]
@@ -618,7 +515,6 @@ def sync_gc_assignments(
             from datetime import datetime, timezone, timedelta
             due_date = datetime.now(timezone.utc) + timedelta(days=7)
 
-        # Create assignment in local DB
         new_assignment = models.Assignment(
             teacher_id         = user.id,
             class_id           = cls.id,
@@ -636,13 +532,9 @@ def sync_gc_assignments(
 
     db.commit()
 
-
-
-
-    # ── Also sync students and their submissions ──────────────────────────
+    # ── Also sync students and their submissions ──────────────────────────────
     gc_id_to_local = sync_gc_students_to_db(course_id, service, db)
 
-    # Enroll synced students into the local class
     for gc_uid, student_id in gc_id_to_local.items():
         exists = db.query(models.ClassEnrollment).filter_by(
             class_id=cls.id, student_id=student_id
@@ -651,7 +543,6 @@ def sync_gc_assignments(
             db.add(models.ClassEnrollment(class_id=cls.id, student_id=student_id))
     db.commit()
 
-    # Fetch all submissions for all assignments in this course
     local_assignments = db.query(models.Assignment).filter_by(
         class_id=cls.id
     ).all()
@@ -669,21 +560,19 @@ def sync_gc_assignments(
             gc_subs = subs_result.get("studentSubmissions", [])
 
             for gc_sub in gc_subs:
-                gc_uid    = gc_sub.get("userId", "")
+                gc_uid     = gc_sub.get("userId", "")
                 student_id = gc_id_to_local.get(gc_uid)
                 if not student_id:
                     continue
 
-                # Check if submission already exists
                 existing_sub = db.query(models.Submission).filter_by(
                     assignment_id = local_assignment.id,
                     student_id    = student_id,
                 ).first()
 
                 if existing_sub:
-                    continue  # already synced
+                    continue
 
-                # Get assigned grade if any
                 assigned_grade = gc_sub.get("assignedGrade")
                 draft_grade    = gc_sub.get("draftGrade")
                 gc_score       = assigned_grade or draft_grade
@@ -707,26 +596,17 @@ def sync_gc_assignments(
 
     db.commit()
     print(f"✅ Synced {submissions_synced} submissions from Google Classroom")
-    # ─────────────────────────────────────────────────────────────────────
-
     print(f"✅ Sync complete: {created} created, {skipped} already existed")
+
     return {
-        "success": True,
-        "created": created,
-        "skipped": skipped,
-        "students_synced": len(gc_id_to_local),
+        "success":            True,
+        "created":            created,
+        "skipped":            skipped,
+        "students_synced":    len(gc_id_to_local),
         "submissions_synced": submissions_synced,
-        "message": f"{created} assignment(s) imported, {len(gc_id_to_local)} students synced, {submissions_synced} submissions synced.",
+        "message":            f"{created} assignment(s) imported, {len(gc_id_to_local)} students synced, {submissions_synced} submissions synced.",
     }
 
-
-    print(f"✅ Sync complete: {created} created, {skipped} already existed")
-    return {
-        "success": True,
-        "created": created,
-        "skipped": skipped,
-        "message": f"{created} assignment(s) imported, {skipped} already existed.",
-    }        
 
 # ── POST /api/teacher/classroom/courses/{course_id}/assignments/{cw_id}/grade ─
 @router.post("/classroom/courses/{course_id}/assignments/{coursework_id}/grade")
@@ -763,31 +643,22 @@ def import_and_grade(
     print(f"📥 Found {len(student_subs)} submissions in Google Classroom")
 
     results = []
-
-    # Track which local student_ids were graded via GC
-    # so we don't re-grade them in the local pass
     gc_graded_student_ids = set()
 
-    # ── Grade Google Classroom submissions ────────────────────────────────────
-   
-
     for gs in student_subs:
-        gc_uid      = gs.get("userId", "unknown")
-        essay_text  = ""
+        gc_uid     = gs.get("userId", "unknown")
+        essay_text = ""
 
-        # Look up student name from local DB
         gc_token_row = db.query(models.StudentGoogleToken).filter_by(gc_user_id=gc_uid).first()
         if gc_token_row:
             student_user_row = db.query(models.User).filter_by(id=gc_token_row.student_id).first()
             student_name = student_user_row.name if student_user_row else gc_uid
         else:
             student_name = gc_uid
+
         attachments = gs.get("assignmentSubmission", {}).get("attachments", [])
 
-        # ── Resolve real student name ─────────────────────────────────────
-        gc_token = db.query(models.StudentGoogleToken).filter_by(
-            gc_user_id=gc_uid
-        ).first()
+        gc_token = db.query(models.StudentGoogleToken).filter_by(gc_user_id=gc_uid).first()
         actual_student_id = gc_token.student_id if gc_token else None
 
         student_name = "Unknown"
@@ -804,21 +675,18 @@ def import_and_grade(
                         fileId = file_id,
                         fields = "mimeType, name"
                     ).execute()
-                    mime = file_meta.get("mimeType", "")
+                    mime      = file_meta.get("mimeType", "")
                     file_name = file_meta.get("name", "")
 
                     print(f"📎 Processing file: {file_name} (mime: {mime})")
 
                     if mime == "application/vnd.google-apps.document":
-                        # Google Doc — export as plain text (always clean)
                         content = drive_svc.files().export(
                             fileId=file_id, mimeType="text/plain"
                         ).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
-                    
 
                     elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                        # .docx file — use python-docx for clean extraction
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         try:
                             import io
@@ -836,8 +704,7 @@ def import_and_grade(
                         "application/vnd.ms-word",
                         "application/x-msword",
                     ):
-                        # Legacy .doc file — binary format, must be handled carefully
-                        content = drive_svc.files().get_media(fileId=file_id).execute()
+                        content   = drive_svc.files().get_media(fileId=file_id).execute()
                         extracted = extract_doc_bytes(content)
                         essay_text += extracted
                         print(f"✅ Extracted legacy .doc text ({len(extracted)} chars)")
@@ -847,7 +714,7 @@ def import_and_grade(
                         try:
                             import io
                             import pypdf
-                            reader = pypdf.PdfReader(io.BytesIO(content))
+                            reader    = pypdf.PdfReader(io.BytesIO(content))
                             extracted = ""
                             for page in reader.pages:
                                 extracted += page.extract_text() or ""
@@ -865,22 +732,8 @@ def import_and_grade(
                     elif "text" in mime:
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
-                   
-                   
-                    elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"):
-                        # Word document — extract with python-docx
-                        try:
-                            import io
-                            from docx import Document
-                            content = drive_svc.files().get_media(fileId=file_id).execute()
-                            doc = Document(io.BytesIO(content))
-                            essay_text += "\n".join([para.text for para in doc.paragraphs])
-                            print(f"📄 Word doc extracted {len(essay_text)} chars")
-                        except Exception as docx_err:
-                            print(f"⚠️ Word doc extraction failed: {docx_err}")                   
 
                     else:
-                        # Unknown type — attempt utf-8 decode as last resort
                         content = drive_svc.files().get_media(fileId=file_id).execute()
                         essay_text += content.decode("utf-8", errors="ignore")
 
@@ -889,10 +742,6 @@ def import_and_grade(
                 except Exception as e:
                     print(f"⚠️ Could not read Drive file {file_id}: {e}")
 
-        # ── Clean extracted text before any DB interaction ────────────────
-        # This MUST happen before the essay_text.strip() check and before
-        # any DB save. clean_text removes NUL bytes that cause PostgreSQL
-        # "string literal cannot contain NUL" errors.
         essay_text = clean_text(essay_text)
 
         if not essay_text.strip():
@@ -916,7 +765,6 @@ def import_and_grade(
                 word_count=word_count,
             )
 
-            # ── Save to DB — always clean text slice before saving ────────
             safe_essay = clean_text(essay_text)[:5000]
 
             existing_sub = db.query(models.Submission).filter(
@@ -963,7 +811,6 @@ def import_and_grade(
             else:
                 print(f"⚠️ Could not find local student for GC user {gc_uid} — skipping DB save")
 
-            # ── Push grade back to Google Classroom ───────────────────────
             try:
                 gc_sub_list = classroom_svc.courses().courseWork().studentSubmissions().list(
                     courseId     = course_id,
@@ -1008,7 +855,7 @@ def import_and_grade(
                 "source":            "google_classroom",
             })
 
-    # ── Grade local submissions — SKIP anyone already graded via GC ──────────
+    # ── Grade local submissions — skip anyone already graded via GC ───────────
     local_subs = db.query(models.Submission, models.User).join(
         models.User, models.User.id == models.Submission.student_id
     ).filter(
@@ -1017,14 +864,8 @@ def import_and_grade(
 
     print(f"📥 Found {len(local_subs)} submissions in local DB")
 
-    # for sub, student_user in local_subs:
-    #     essay_text = sub.essay_text
-    #     if not essay_text or not essay_text.strip():
-    #         continue
-
     for sub, student_user in local_subs:
 
-        # ── Skip if this student was already graded via Google Classroom ──
         if student_user.id in gc_graded_student_ids:
             print(f"⏭️ Skipping {student_user.name} — already graded via Google Classroom")
             continue
@@ -1033,7 +874,6 @@ def import_and_grade(
         if not essay_text or not essay_text.strip():
             continue
 
-        # Skip placeholder text from sync
         if essay_text.strip().startswith("[Submitted via Google Classroom"):
             continue
 
@@ -1081,6 +921,7 @@ def import_and_grade(
         "results":      results,
     }
 
+
 # ── GET /api/teacher/classroom/status ────────────────────────────────────────
 @router.get("/classroom/status")
 def check_connection_status(ctx: dict = Depends(require_teacher)):
@@ -1098,7 +939,6 @@ def check_connection_status(ctx: dict = Depends(require_teacher)):
 
 
 # ── POST /api/teacher/classes/{class_id}/link-google ─────────────────────────
-
 class LinkGoogleRequest(BaseModel):
     gc_course_id: str
 
@@ -1157,7 +997,6 @@ def enroll_gc_students(
             skipped += 1
             continue
 
-        # Step 1 — find or create local user
         local_user = db.query(models.User).filter_by(email=email).first()
 
         if not local_user:
@@ -1176,7 +1015,6 @@ def enroll_gc_students(
             created += 1
             print(f"✅ Created local account for {full_name} ({email})")
 
-        # Step 2 — link gc_user_id for grading matching
         gc_token = db.query(models.StudentGoogleToken).filter_by(
             student_id=local_user.id
         ).first()
@@ -1187,7 +1025,6 @@ def enroll_gc_students(
                 gc_user_id = gc_uid,
             ))
 
-        # Step 3 — enroll in local class if not already enrolled
         already_enrolled = db.query(models.ClassEnrollment).filter_by(
             class_id   = local_class_id,
             student_id = local_user.id,
@@ -1213,7 +1050,7 @@ def enroll_gc_students(
     }
 
 
-# ── POST /api/teacher/classroom/courses/{course_id}/sync ─────────────────────
+# ── POST /api/teacher/classroom/courses/{course_id}/sync (full sync) ──────────
 @router.post("/classroom/courses/{course_id}/sync")
 def sync_gc_course(
     course_id:      str,
@@ -1231,12 +1068,11 @@ def sync_gc_course(
     creds   = get_credentials(user.id, db)
     service = build("classroom", "v1", credentials=creds)
 
-    # ── Sync students ─────────────────────────────────────────────────────────
     students_result = service.courses().students().list(
         courseId=course_id
     ).execute()
 
-    gc_students = students_result.get("students", [])
+    gc_students       = students_result.get("students", [])
     students_created  = 0
     students_enrolled = 0
 
@@ -1263,7 +1099,6 @@ def sync_gc_course(
             db.flush()
             students_created += 1
 
-        # Link gc_user_id
         gc_token = db.query(models.StudentGoogleToken).filter_by(
             student_id=local_user.id
         ).first()
@@ -1273,7 +1108,6 @@ def sync_gc_course(
                 gc_user_id=gc_uid,
             ))
 
-        # Enroll in local class
         already = db.query(models.ClassEnrollment).filter_by(
             class_id=local_class_id, student_id=local_user.id
         ).first()
@@ -1283,7 +1117,6 @@ def sync_gc_course(
             ))
             students_enrolled += 1
 
-    # ── Sync assignments ──────────────────────────────────────────────────────
     work_result = service.courses().courseWork().list(
         courseId=course_id
     ).execute()
@@ -1294,7 +1127,6 @@ def sync_gc_course(
     for gca in gc_assignments:
         gc_cw_id = gca.get("id")
 
-        # Skip if already imported
         exists = db.query(models.Assignment).filter_by(
             gc_coursework_id=gc_cw_id
         ).first()

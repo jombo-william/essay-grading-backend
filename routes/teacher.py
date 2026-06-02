@@ -314,11 +314,8 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
 
-<<<<<<< HEAD
     # â”€â”€ Also create in Google Classroom if class is linked â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-=======
 # ── NEW: also create in Google Classroom if class is linked ──────────────
->>>>>>> 19edc00 (added a new trained phi3 model for grading)
     try:
         from routes.google_classroom import create_gc_assignment
         gc_id = create_gc_assignment(user.id, body.class_id, assignment, db)
@@ -345,12 +342,9 @@ def create_assignment(
     except Exception as e:
         print(f"⚠️ Moodle sync skipped: {e}")
 
-<<<<<<< HEAD
-=======
     return {"success": True, "message": "Assignment created", "id": assignment.id}
 
 # ── POST /api/teacher/assignments/{assignment_id}/upload-reference ────────────
->>>>>>> 19edc00 (added a new trained phi3 model for grading)
 
 @router.post("/assignments/{assignment_id}/upload-reference")
 async def upload_reference_material(
@@ -790,7 +784,6 @@ def override_grade(
 
     return {"success": True, "message": "Grade approved and released to student"}
 
-<<<<<<< HEAD
 
 # â”€â”€ POST /api/teacher/submissions/approve-all â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -889,6 +882,4 @@ def approve_all_grades(
         "approved": len(submissions),
         "message":  f"{len(submissions)} submission(s) approved and released to students.",
     }
-=======
     
->>>>>>> 19edc00 (added a new trained phi3 model for grading)
