@@ -1,26 +1,37 @@
 # routes/ai_grader.py
 """
-ENSEMBLE GRADING CHAIN v5.1 — RUBRIC-AWARE DYNAMIC ROUTING
+ENSEMBLE GRADING CHAIN v5.3 — PER-CRITERION STAGE 3 SCORING
 ═══════════════════════════════════════════════════════════
 
-FIXED IN v5.1:
-  - FIX 1: cumulative_feedback double-init bug removed (Stage 0 feedback no longer lost)
-  - FIX 2: Stage 3 JSON keys now use generic names (thesis_score / evidence_score)
-            so the model is not confused when s3_max != 75
-  - FIX 3: coherence_score field renamed to coherence_score (no "out_of_10" suffix)
-            so the model respects the actual s2_max from the prompt, not 10
-  - FIX 4: s3_thesis_max / s3_evidence_max computed once in grade_with_ai() and
-            passed into call_gemini_stage3() — no more dual computation drift
-  - FIX 5: Partial-topic cap applied in Stage 3 as well as Stage 2
-  - FIX 6: _strip_markdown() is now applied to all AI-generated free-text fields
-            before they are embedded in feedback (no raw markdown in output)
-  - FIX 7: classify_rubric_criteria() adds a comment explaining silent linguistics-first
-            priority when a criterion matches both buckets
+NEW IN v5.3:
+  - Stage 3 now scores EACH content criterion individually by name and weight.
+    The model returns {"criterion_scores": {"Criterion Name": <pts>, ...}, ...}
+    and the pipeline computes Stage 3 total as a weighted sum of those values.
+    This replaces the old fixed thesis_score / evidence_score two-bucket split.
+  - Deductions (missing terminology, no evidence, vague thesis, shallow
+    conclusion, repetitive paragraphs) are now applied per-criterion based on
+    each criterion's semantic role, not globally to one of two buckets.
+  - _build_stage3_fallback_prompt updated to request per-criterion JSON.
+  - Score breakdown header updated: Stage 3 row now shows per-criterion detail.
+  - call_gemini_stage3 signature change: s3_thesis_max / s3_evidence_max removed
+    (no longer needed — weights come from the rubric criteria directly).
+  - grade_with_ai: s3_thesis_max / s3_evidence_max computation removed.
 
-PRESERVED FROM v5.0:
-  - Dynamic stage weight extraction from rubric / reference material
-  - Stage 0 checklist extraction
-  - FIX 1-5 from v4.2 (band scale, partial cap, second-pass, breakdown, floors)
+FIXED IN v5.1 (preserved):
+  - FIX 1: cumulative_feedback double-init bug removed
+  - FIX 2: Stage 3 JSON keys now use generic names
+  - FIX 3: coherence_score field renamed (no "out_of_10" suffix)
+  - FIX 4: stage split computed once in grade_with_ai()
+  - FIX 5: Partial-topic cap applied in Stage 3 as well as Stage 2
+  - FIX 6: _strip_markdown() applied to all AI free-text
+  - FIX 7: linguistics-first priority comment in classify_rubric_criteria()
+
+NEW IN v5.2 (preserved):
+  - rubric_content (marking key) and reference_material (study docs) are
+    read as SEPARATE fields matching the AssignmentForm layout.
+  - Stage 0 uses ONLY rubric_content for checklist extraction.
+  - Stage 3 receives rubric_content as primary anchor and reference_material
+    as secondary context, labelled separately in prompt.
 """
 
 import os
@@ -87,8 +98,7 @@ _COHERENCE_KEYWORDS = {
     "structure", "coherence", "flow", "organisation", "organization",
     "format", "clarity", "paragraphing", "transitions", "layout",
     "logical order", "sequencing", "structure & coherence",
-    # Note: "introduction" and "conclusion" removed — too broad,
-    # would incorrectly catch "introduction of examples" etc.
+    # Note: "introduction" and "conclusion" removed — too broad.
     # "Real-World Examples", "evidence", "examples" -> content bucket
 }
 
@@ -263,17 +273,17 @@ def classify_rubric_criteria(criteria: list[dict]) -> dict:
 def resolve_stage_weights(assignment) -> tuple[float, float, float, dict]:
     """
     Determines point budgets for each stage from:
-      1. Criteria parsed from reference_material (marking key)
+      1. Criteria parsed from rubric_content (dedicated marking key field)
       2. Falling back to assignment.rubric dict
       3. Falling back to hardcoded defaults (15 / 10 / 75)
 
     Returns:
         (s1_max, s2_max, s3_max, classified_criteria)
     """
-    reference = getattr(assignment, "reference_material", "") or ""
+    rubric_content = getattr(assignment, "rubric_content", "") or ""
     rubric    = getattr(assignment, "rubric", None)
 
-    criteria = parse_marking_key_from_reference(reference)
+    criteria = parse_marking_key_from_reference(rubric_content)
 
     if not criteria and rubric:
         if isinstance(rubric, str):
@@ -337,23 +347,32 @@ def _format_stage0_checklist(checklist: list[str]) -> str:
     return "\n".join([f"  - {item}" for item in checklist])
 
 
-def _build_stage0_checklist_prompt(assignment, content_criteria: list[dict], reference_material: str) -> str:
-    title        = getattr(assignment, "title", "Untitled")
-    instructions = getattr(assignment, "instructions", "")
-    rubric_text  = _format_assignment_rubric(assignment)
-    ref_block    = f"\nREFERENCE MATERIAL / MARKING KEY:\n{reference_material[:3000]}\n\n" if reference_material.strip() else ""
+def _build_stage0_checklist_prompt(assignment, content_criteria: list[dict], rubric_content: str) -> str:
+    """
+    Builds the Stage 0 prompt using ONLY rubric_content (the marking key).
+    Reference material (books/notes) is intentionally excluded here.
+    """
+    title          = getattr(assignment, "title", "Untitled")
+    instructions   = getattr(assignment, "instructions", "")
+    rubric_text    = _format_assignment_rubric(assignment)
     criteria_block = _format_criteria_for_prompt(content_criteria or [])
+
+    rubric_key_block = (
+        f"\nMARKING KEY / RUBRIC DOCUMENT:\n{rubric_content[:4000]}\n\n"
+        if rubric_content and rubric_content.strip()
+        else ""
+    )
 
     return (
         "You are an expert academic rubric analyst.\n"
-        "Extract an explicit checklist of required essay elements from the marking key and rubric.\n"
+        "Extract an explicit checklist of required essay elements from the marking key and rubric below.\n"
         "Produce concrete, testable checklist items that the essay must contain or demonstrate.\n"
         "Do not invent requirements not implied by the marking key or rubric.\n\n"
         f"Assignment Title: {title}\n"
         f"Assignment Instructions: {instructions}\n\n"
-        f"RUBRIC / MARKING KEY:\n{rubric_text}\n\n"
-        f"{ref_block}"
-        f"CONTENT CRITERIA:\n{criteria_block}\n\n"
+        f"RUBRIC CRITERIA (with weights):\n{rubric_text}\n\n"
+        f"{rubric_key_block}"
+        f"CONTENT CRITERIA TO FOCUS ON:\n{criteria_block}\n\n"
         "Output ONLY valid JSON with a single key 'checklist':\n"
         "{\n"
         "  \"checklist\": [\n"
@@ -364,11 +383,15 @@ def _build_stage0_checklist_prompt(assignment, content_criteria: list[dict], ref
     )
 
 
-def extract_stage0_checklist(assignment, content_criteria: list[dict], reference_material: str) -> list[str]:
-    if not reference_material and not content_criteria:
+def extract_stage0_checklist(assignment, content_criteria: list[dict], rubric_content: str) -> list[str]:
+    """
+    Extracts the marking key checklist from rubric_content ONLY.
+    Does not use reference_material (study notes).
+    """
+    if not rubric_content and not content_criteria:
         return []
 
-    prompt = _build_stage0_checklist_prompt(assignment, content_criteria, reference_material)
+    prompt = _build_stage0_checklist_prompt(assignment, content_criteria, rubric_content)
     raw = None
     try:
         if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
@@ -486,7 +509,6 @@ def parse_phi3_stage1_response(raw: str, s1_max: float) -> tuple:
     floor = round(s1_max * 0.20, 1)
     stage1_score = max(floor, stage1_score)
 
-    # Strip markdown from the raw AI response before embedding
     clean_raw = _strip_markdown(raw.strip())
 
     feedback = (
@@ -514,10 +536,6 @@ def run_stage2_qwen(
     """
     Topic guard + structural coherence scoring.
     Max contribution = s2_max points.
-
-    FIX v5.1: The returned JSON field is now "coherence_score" (no "out_of_10"
-    suffix) so the model respects the actual s2_max stated in the prompt and
-    does not silently cap its output at 10.
     """
     clean_title    = assignment_title.strip()
     clean_instruct = assignment_instructions.strip() if assignment_instructions else "Follow core title theme."
@@ -605,7 +623,7 @@ Note: classification choices: "completely_on_topic", "partially_on_topic", "comp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STAGE 3: GROQ — CONTENT, LOGIC & RUBRIC  (weight = content_weight)
+# STAGE 3: GROQ — PER-CRITERION CONTENT SCORING  (weight = content_weight)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _format_assignment_rubric(assignment) -> str:
@@ -623,24 +641,110 @@ def _format_assignment_rubric(assignment) -> str:
     return str(rubric)
 
 
-def _build_stage3_fallback_prompt(essay_text: str, assignment, s3_max: float) -> str:
-    title        = getattr(assignment, "title", "Untitled")
-    instructions = getattr(assignment, "instructions", "")
-    rubric_text  = _format_assignment_rubric(assignment)
-    reference    = getattr(assignment, "reference_material", "") or ""
-    reference_block = f"REFERENCE / MARKING KEY:\n{reference[:2000]}\n\n" if reference.strip() else ""
+def _build_criterion_scoring_schema(content_criteria: list[dict], s3_max: float) -> tuple[str, dict]:
+    """
+    Builds the JSON schema description and per-criterion point maximums for the
+    Stage 3 prompt.
+
+    Returns:
+        (schema_description: str, criterion_maxes: dict[name -> max_pts])
+
+    Each criterion's max points = (criterion.weight / total_content_weight) * s3_max,
+    rounded to 1 decimal place. The last criterion absorbs rounding remainder to
+    ensure sum == s3_max exactly.
+    """
+    if not content_criteria:
+        # No explicit criteria — fall back to two generic buckets
+        half = round(s3_max / 2, 1)
+        other_half = round(s3_max - half, 1)
+        criterion_maxes = {
+            "Thesis & Argument Development": half,
+            "Evidence & Subject Accuracy":   other_half,
+        }
+        schema_lines = [
+            f'  "criterion_scores": {{',
+            f'    "Thesis & Argument Development": <0 to {half}>,',
+            f'    "Evidence & Subject Accuracy": <0 to {other_half}>',
+            f'  }},',
+        ]
+        return "\n".join(schema_lines), criterion_maxes
+
+    total_weight = sum(c["weight"] for c in content_criteria)
+    if total_weight <= 0:
+        total_weight = 100.0
+
+    criterion_maxes = {}
+    allocated = 0.0
+    for i, c in enumerate(content_criteria):
+        if i == len(content_criteria) - 1:
+            # Last criterion absorbs any rounding remainder
+            pts = round(s3_max - allocated, 1)
+        else:
+            pts = round((c["weight"] / total_weight) * s3_max, 1)
+        criterion_maxes[c["name"]] = pts
+        allocated += pts
+
+    schema_lines = ['  "criterion_scores": {']
+    names = list(criterion_maxes.keys())
+    for i, name in enumerate(names):
+        comma = "," if i < len(names) - 1 else ""
+        schema_lines.append(f'    "{name}": <0 to {criterion_maxes[name]}>{comma}')
+    schema_lines.append("  },")
+
+    return "\n".join(schema_lines), criterion_maxes
+
+
+def _build_stage3_criteria_detail(content_criteria: list[dict], criterion_maxes: dict) -> str:
+    """
+    Formats the per-criterion scoring table for the Stage 3 prompt body.
+    """
+    if not content_criteria:
+        lines = []
+        for name, max_pts in criterion_maxes.items():
+            lines.append(f"  - {name}: max {max_pts} pts")
+        return "\n".join(lines)
+
+    lines = []
+    for c in content_criteria:
+        max_pts = criterion_maxes.get(c["name"], 0)
+        desc = f" — {c['descriptor']}" if c.get("descriptor") else ""
+        lines.append(f"  - {c['name']}: max {max_pts} pts (rubric weight {c['weight']}%){desc}")
+    return "\n".join(lines)
+
+
+def _build_stage3_fallback_prompt(essay_text: str, assignment, s3_max: float,
+                                   content_criteria: list[dict] = None) -> str:
+    title              = getattr(assignment, "title", "Untitled")
+    instructions       = getattr(assignment, "instructions", "")
+    rubric_text        = _format_assignment_rubric(assignment)
+    rubric_content     = getattr(assignment, "rubric_content", "") or ""
+    reference_material = getattr(assignment, "reference_material", "") or ""
+
+    rubric_key_block = (
+        f"MARKING KEY / RUBRIC DOCUMENT (grade against this directly):\n{rubric_content[:2000]}\n\n"
+        if rubric_content.strip() else ""
+    )
+    ref_block = (
+        f"REFERENCE MATERIAL (for factual context):\n{reference_material[:1500]}\n\n"
+        if reference_material.strip() else ""
+    )
+
+    schema_desc, criterion_maxes = _build_criterion_scoring_schema(content_criteria or [], s3_max)
+    criteria_detail = _build_stage3_criteria_detail(content_criteria or [], criterion_maxes)
 
     return (
-        f"You are a strict academic grader. Grade this essay out of {s3_max} points.\n\n"
+        f"You are a strict academic grader. Grade this essay against each criterion below.\n\n"
         f"Assignment Title: {title}\n"
         f"Assignment Instructions: {instructions}\n\n"
-        f"Rubric:\n{rubric_text}\n\n"
-        f"{reference_block}"
+        f"Rubric criteria:\n{rubric_text}\n\n"
+        f"{rubric_key_block}"
+        f"{ref_block}"
+        f"CRITERIA TO SCORE INDIVIDUALLY (max points shown per criterion):\n{criteria_detail}\n\n"
         f"Student Essay:\n{essay_text[:3000]}\n\n"
-        f"Respond in valid JSON only:\n"
+        f"Respond in valid JSON only — one score per criterion, then a critique:\n"
         f"{{\n"
-        f"  \"score\": <0-{s3_max}>,\n"
-        f"  \"feedback\": \"<detailed critique>\"\n"
+        f"{schema_desc}\n"
+        f'  "comprehensive_critique": "<detailed critique>"\n'
         f"}}"
     )
 
@@ -649,11 +753,62 @@ def _call_groq_once(groq_client, model_name: str, prompt: str) -> dict:
     response = groq_client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1200,
+        max_tokens=1500,
         temperature=0.0,
         seed=42,
     )
     return clean_and_parse_json(response.choices[0].message.content.strip())
+
+
+def _sum_criterion_scores(parsed: dict, criterion_maxes: dict) -> tuple[float, dict]:
+    """
+    Extracts per-criterion scores from the model response, clamps each to its
+    maximum, and returns (total, {name: clamped_score}).
+
+    Handles both:
+      {"criterion_scores": {"Name": 12.5, ...}, ...}
+      {"Name": 12.5, ...}  (flat — older fallback format)
+    """
+    raw_scores = parsed.get("criterion_scores", {})
+    if not raw_scores:
+        # Try flat format
+        raw_scores = {k: parsed[k] for k in criterion_maxes if k in parsed}
+
+    clamped = {}
+    total = 0.0
+    for name, max_pts in criterion_maxes.items():
+        raw = raw_scores.get(name, max_pts * 0.5)
+        try:
+            score = max(0.0, min(float(max_pts), float(raw)))
+        except (TypeError, ValueError):
+            score = max_pts * 0.5
+        clamped[name] = round(score, 1)
+        total += clamped[name]
+
+    return round(total, 1), clamped
+
+
+def _apply_partial_topic_cap(clamped_scores: dict, criterion_maxes: dict,
+                              content_criteria: list[dict]) -> dict:
+    """
+    For partially-on-topic essays: cap each evidence-type criterion at 60% of
+    its maximum. Evidence-type criteria are those whose name or descriptor
+    contains evidence-related keywords.
+    """
+    EVIDENCE_KEYWORDS = {
+        "evidence", "example", "case study", "research", "data", "framework",
+        "theory", "application", "accuracy", "subject", "content", "knowledge",
+    }
+    capped = dict(clamped_scores)
+    for c in content_criteria:
+        name = c["name"]
+        combined = (name + " " + c.get("descriptor", "")).lower()
+        if any(kw in combined for kw in EVIDENCE_KEYWORDS):
+            cap = round(criterion_maxes[name] * 0.60, 1)
+            if capped.get(name, 0) > cap:
+                print(f"[Stage 3] Partial-topic cap applied to '{name}': {capped[name]} -> {cap}")
+                capped[name] = cap
+    return capped
 
 
 def call_gemini_stage3(
@@ -661,38 +816,50 @@ def call_gemini_stage3(
     assignment,
     word_count: int,
     s3_max: float,
-    s3_thesis_max: float,
-    s3_evidence_max: float,
     content_criteria: list = None,
+    rubric_content: str = "",
     reference_material: str = "",
     stage0_checklist: list[str] = None,
     is_partially_on_topic: bool = False,
 ) -> dict:
     """
-    Stage 3: Grades content criteria from the rubric.
-    Max contribution = s3_max points.
+    Stage 3: Scores EACH content criterion individually by name and weight.
 
-    FIX v5.1 (key names): JSON response fields are now generic —
-      "thesis_score" and "evidence_score" — so the model is not misled
-      by a hardcoded "out_of_38" / "out_of_37" suffix when s3_max != 75.
+    v5.3 change: The model now returns a "criterion_scores" dict keyed by the
+    exact criterion names from the rubric. The pipeline converts these to a
+    weighted sum for the Stage 3 total. This replaces the fixed
+    thesis_score / evidence_score two-bucket approach.
 
-    FIX v5.1 (split passed in): s3_thesis_max and s3_evidence_max are
-      computed once in grade_with_ai() and passed here to avoid drift.
-
-    FIX v5.1 (partial topic cap): If is_partially_on_topic is True,
-      evidence_score is capped at 60% of s3_evidence_max.
+    Returns a dict containing:
+        "criterion_scores":      {name: clamped_score, ...}
+        "criterion_maxes":       {name: max_pts, ...}
+        "s3_total":              float
+        "comprehensive_critique": str
     """
     title        = getattr(assignment, "title", "Untitled")
     instructions = getattr(assignment, "instructions", "")
 
-    criteria_block  = _format_criteria_for_prompt(content_criteria or [])
+    # Build per-criterion schema and point maxes from the rubric
+    schema_desc, criterion_maxes = _build_criterion_scoring_schema(content_criteria or [], s3_max)
+    criteria_detail = _build_stage3_criteria_detail(content_criteria or [], criterion_maxes)
+
     checklist_block = "No explicit checklist items available from Stage 0."
     if stage0_checklist:
         checklist_block = "\n".join([f"  - {item}" for item in stage0_checklist])
 
+    rubric_key_block = ""
+    if rubric_content and rubric_content.strip():
+        rubric_key_block = (
+            f"\nMARKING KEY / RUBRIC DOCUMENT (PRIMARY grading anchor — "
+            f"grade against this directly):\n{rubric_content[:3000]}\n"
+        )
+
     ref_block = ""
     if reference_material and reference_material.strip():
-        ref_block = f"\nMARKING KEY / REFERENCE MATERIAL (use to assess against expected content):\n{reference_material[:3000]}\n"
+        ref_block = (
+            f"\nREFERENCE MATERIAL (use to verify factual accuracy of essay claims):\n"
+            f"{reference_material[:2000]}\n"
+        )
 
     # Quality benchmarks
     excellent_pct = round(s3_max * 0.90, 0)
@@ -700,13 +867,20 @@ def call_gemini_stage3(
     moderate_pct  = round(s3_max * 0.50, 0)
     weak_pct      = round(s3_max * 0.30, 0)
 
-    # Partial topic note injected into prompt when applicable
     partial_note = (
         f"\nNOTE: This essay was classified as partially on-topic. "
-        f"Cap evidence_score at {round(s3_evidence_max * 0.60, 1)} "
-        f"({round(60)}% of its maximum).\n"
+        f"Evidence-type criteria will be capped at 60% of their individual maximums.\n"
         if is_partially_on_topic else ""
     )
+
+    # Build per-criterion deduction guidance
+    deduction_examples = []
+    for name, max_pts in criterion_maxes.items():
+        deduction_examples.append(
+            f"  - {name}: cap at {round(max_pts * 0.5, 1)} if the core requirement is absent or "
+            f"at {round(max_pts * 0.6, 1)} if partially addressed"
+        )
+    deduction_block = "\n".join(deduction_examples)
 
     prompt = f"""You are a strict senior academic professor grading against the exact criteria below.
 Grade ONLY the content, argument quality, and subject-matter accuracy.
@@ -714,68 +888,60 @@ Do NOT re-assess grammar, vocabulary, or basic topic relevance — those are han
 
 ASSIGNMENT TITLE: {title}
 ASSIGNMENT INSTRUCTIONS: {instructions}
-{ref_block}{partial_note}
-CONTENT CRITERIA TO GRADE (these are the ONLY criteria that matter for this stage):
-{criteria_block}
+{rubric_key_block}{ref_block}{partial_note}
+CRITERIA TO SCORE (score each criterion individually — do NOT combine them):
+{criteria_detail}
 
 CHECKLIST ITEMS FOR VERIFICATION:
 {checklist_block}
 
-For each checklist item above, state whether it is Present, Partially Present, or Missing.
-Missing checklist items should be treated as important deductions.
+For each checklist item above, state in your critique whether it is Present, Partially Present,
+or Missing. Missing checklist items must result in visible score reductions on the relevant criterion.
 
 STUDENT ESSAY:
 {essay_text}
 WORD COUNT: {word_count}
 
-SCORING (total {s3_max} points):
-  thesis_score:    max {s3_thesis_max}   (thesis clarity, argument development, logical flow, conclusion synthesis)
-  evidence_score:  max {s3_evidence_max}   (accuracy against marking key, use of required frameworks/theory, evidence quality, examples)
-
-QUALITY BENCHMARKS (total out of {s3_max}):
+OVERALL QUALITY BENCHMARKS (total out of {s3_max}):
   Excellent  (>={excellent_pct}): All criteria met at distinction level. Specific frameworks named and explained. Critical analysis present. Conclusion synthesises rather than restates.
   Good       (>={good_pct}):     Most criteria met. Some frameworks used. Minor gaps in depth or evidence.
   Moderate   (>={moderate_pct}):  Some criteria met. Descriptive rather than analytical. Basic frameworks only. Thin evidence.
   Weak       (>={weak_pct}):     Few criteria met. Missing key required content. No named frameworks. No evidence.
   Very Weak  (<{weak_pct}):     Criteria largely unmet. Fundamental errors. No analytical engagement.
 
-MANDATORY DEDUCTIONS (apply BEFORE scoring):
+MANDATORY DEDUCTIONS — apply BEFORE finalising each criterion score:
 
-1. MISSING REQUIRED TERMINOLOGY: If the essay is missing subject-specific vocabulary
-   that the marking key or criteria explicitly require -> CAP evidence_score
-   at 50% of its maximum ({round(s3_evidence_max * 0.5, 0)} pts)
+For each criterion, apply proportional caps based on what is absent:
+{deduction_block}
 
-2. NO EVIDENCE / EXAMPLES: If zero concrete examples, case studies, named theories,
-   or quantifiable facts are present -> CAP evidence_score
-   at 60% of its maximum ({round(s3_evidence_max * 0.6, 0)} pts)
+Universal deduction rules:
+1. MISSING REQUIRED TERMINOLOGY: If the essay lacks subject-specific vocabulary explicitly
+   required by the marking key -> cap affected criterion at 50% of its maximum.
+2. NO EVIDENCE / EXAMPLES: Zero concrete examples, named theories, or case studies
+   -> cap evidence/application criteria at 60% of their maximums.
+3. VAGUE / ABSENT THESIS: No clear arguable claim in the introduction
+   -> cap argument/thesis criteria at 50% of their maximums.
+4. SHALLOW CONCLUSION: Conclusion only restates introduction
+   -> deduct 8% from thesis/argument criteria.
+5. REPETITIVE BODY: 3+ paragraphs making the same point
+   -> deduct 18% from thesis/argument criteria.
 
-3. VAGUE / ABSENT THESIS: Introduction contains no clear arguable claim
-   (just "this essay will discuss X") -> CAP thesis_score
-   at 50% of its maximum ({round(s3_thesis_max * 0.5, 0)} pts)
-
-4. SHALLOW CONCLUSION: Conclusion only restates introduction with no synthesis
-   -> DEDUCT {round(s3_thesis_max * 0.08, 1)} points from thesis_score
-
-5. REPETITIVE BODY PARAGRAPHS: 3+ paragraphs making the same point with different
-   subjects -> DEDUCT {round(s3_thesis_max * 0.18, 1)} points from thesis_score
-
-These caps are proportional and subject-neutral.
-Do NOT apply subject-specific penalties not present in the criteria above.
+These caps are proportional and subject-neutral. Do NOT invent penalties not implied by the criteria.
 
 Your comprehensive_critique MUST:
-1. State which content criteria were met, partially met, or missed
-2. State which deductions/caps were triggered and why
-3. Reference specific passages or lack thereof as evidence
-4. State what the essay would need to reach the next quality band
+1. Address each criterion individually — state what was met, partially met, or missed
+2. State which deductions/caps were triggered on which criterion and why
+3. Reference specific passages or their absence as evidence
+4. State what the essay would need to reach the next quality band per criterion
 
-Respond with ONLY a valid JSON object:
+Respond with ONLY a valid JSON object — use the exact criterion names as keys:
 {{
-    "thesis_score": {round(s3_thesis_max * 0.50, 1)},
-    "evidence_score": {round(s3_evidence_max * 0.50, 1)},
-    "comprehensive_critique": "Detailed critique here."
+{schema_desc}
+  "comprehensive_critique": "Detailed per-criterion critique here."
 }}
-Note: thesis_score must be between 0 and {s3_thesis_max}
-Note: evidence_score must be between 0 and {s3_evidence_max}"""
+
+Scoring constraints:
+{chr(10).join(f'  - "{name}" must be between 0 and {max_pts}' for name, max_pts in criterion_maxes.items())}"""
 
     # PRIMARY: Groq
     if GROQ_SDK_AVAILABLE and GROQ_API_KEY:
@@ -791,30 +957,30 @@ Note: evidence_score must be between 0 and {s3_evidence_max}"""
                 print(f"[Stage 3] Trying Groq -> {model_name}")
                 parsed = _call_groq_once(groq_client, model_name, prompt)
 
-                s3_thesis   = max(0.0, min(s3_thesis_max,   float(parsed.get("thesis_score",   s3_thesis_max   * 0.5))))
-                s3_evidence = max(0.0, min(s3_evidence_max, float(parsed.get("evidence_score", s3_evidence_max * 0.5))))
+                s3_total, clamped_scores = _sum_criterion_scores(parsed, criterion_maxes)
 
-                # Enforce partial topic cap on evidence score
-                if is_partially_on_topic:
-                    s3_evidence = min(s3_evidence, round(s3_evidence_max * 0.60, 1))
-
-                s3_total = s3_thesis + s3_evidence
+                # Apply partial topic cap per criterion
+                if is_partially_on_topic and content_criteria:
+                    clamped_scores = _apply_partial_topic_cap(
+                        clamped_scores, criterion_maxes, content_criteria
+                    )
+                    s3_total = round(sum(clamped_scores.values()), 1)
 
                 # Second-pass for long essays scoring unexpectedly low
                 if word_count >= 600 and s3_total < (s3_max * 0.53):
                     print(f"[Stage 3] Long essay scored low ({s3_total}/{s3_max}) — verification pass...")
                     try:
-                        parsed2     = _call_groq_once(groq_client, model_name, prompt)
-                        s3_thesis2  = max(0.0, min(s3_thesis_max,   float(parsed2.get("thesis_score",   s3_thesis_max   * 0.5))))
-                        s3_evidence2= max(0.0, min(s3_evidence_max, float(parsed2.get("evidence_score", s3_evidence_max * 0.5))))
-                        if is_partially_on_topic:
-                            s3_evidence2 = min(s3_evidence2, round(s3_evidence_max * 0.60, 1))
-                        s3_total2   = s3_thesis2 + s3_evidence2
+                        parsed2 = _call_groq_once(groq_client, model_name, prompt)
+                        s3_total2, clamped_scores2 = _sum_criterion_scores(parsed2, criterion_maxes)
+                        if is_partially_on_topic and content_criteria:
+                            clamped_scores2 = _apply_partial_topic_cap(
+                                clamped_scores2, criterion_maxes, content_criteria
+                            )
+                            s3_total2 = round(sum(clamped_scores2.values()), 1)
 
                         if s3_total2 > s3_total:
-                            s3_thesis   = s3_thesis2
-                            s3_evidence = s3_evidence2
-                            s3_total    = s3_total2
+                            s3_total = s3_total2
+                            clamped_scores = clamped_scores2
                             parsed["comprehensive_critique"] = parsed2.get(
                                 "comprehensive_critique",
                                 parsed.get("comprehensive_critique", "")
@@ -825,10 +991,13 @@ Note: evidence_score must be between 0 and {s3_evidence_max}"""
                     except Exception as ve:
                         print(f"[Stage 3] Verification pass failed: {ve}")
 
-                parsed["thesis_score"]   = s3_thesis
-                parsed["evidence_score"] = s3_evidence
                 print(f"[Stage 3] Groq graded with {model_name} — {s3_total}/{s3_max}")
-                return parsed
+                return {
+                    "criterion_scores":      clamped_scores,
+                    "criterion_maxes":       criterion_maxes,
+                    "s3_total":              s3_total,
+                    "comprehensive_critique": parsed.get("comprehensive_critique", ""),
+                }
 
             except Exception as e:
                 print(f"[Stage 3] Groq error on {model_name}: {e} — next...")
@@ -838,27 +1007,41 @@ Note: evidence_score must be between 0 and {s3_evidence_max}"""
     else:
         print("[Stage 3] Groq unavailable — HF fallback...")
 
-    # FALLBACK: HF router
-    fallback_prompt = (
-        f"You are a strict academic grader. Grade the content, argument quality, and rubric "
-        f"adherence of this essay out of {s3_max} points. Respond with: 'Score: X/{s3_max}'\n\n"
-        f"Essay:\n{essay_text}"
+    # FALLBACK: HF router — returns a flat score, split proportionally
+    fallback_prompt = _build_stage3_fallback_prompt(
+        essay_text, assignment, s3_max, content_criteria
     )
     raw_hf   = call_huggingface(fallback_prompt)
     s3_total = s3_max * 0.50
-    num_match = re.search(rf"(\d+\.?\d*)\s*/\s*{int(s3_max)}", raw_hf)
-    if num_match:
-        s3_total = min(s3_max, max(0.0, float(num_match.group(1))))
-    if is_partially_on_topic:
-        s3_evidence_cap = round(s3_evidence_max * 0.60, 1)
-        s3_evidence_raw = round(s3_total * (s3_evidence_max / s3_max), 1)
-        s3_evidence_raw = min(s3_evidence_raw, s3_evidence_cap)
-        s3_thesis_raw   = round(s3_total * (s3_thesis_max / s3_max), 1)
-        s3_total        = s3_thesis_raw + s3_evidence_raw
+
+    try:
+        parsed_hf = clean_and_parse_json(raw_hf)
+        _, clamped_scores = _sum_criterion_scores(parsed_hf, criterion_maxes)
+        if is_partially_on_topic and content_criteria:
+            clamped_scores = _apply_partial_topic_cap(
+                clamped_scores, criterion_maxes, content_criteria
+            )
+        s3_total = round(sum(clamped_scores.values()), 1)
+        critique = _strip_markdown(parsed_hf.get("comprehensive_critique", raw_hf[:800]))
+    except Exception:
+        # Last resort: parse a "Score: X/Y" pattern and split evenly
+        num_match = re.search(rf"(\d+\.?\d*)\s*/\s*{int(s3_max)}", raw_hf)
+        if num_match:
+            s3_total = min(s3_max, max(0.0, float(num_match.group(1))))
+        frac = s3_total / s3_max if s3_max > 0 else 0.5
+        clamped_scores = {name: round(max_pts * frac, 1) for name, max_pts in criterion_maxes.items()}
+        if is_partially_on_topic and content_criteria:
+            clamped_scores = _apply_partial_topic_cap(
+                clamped_scores, criterion_maxes, content_criteria
+            )
+        s3_total = round(sum(clamped_scores.values()), 1)
+        critique = _strip_markdown(raw_hf[:800])
+
     return {
-        "thesis_score":   round(s3_total * (s3_thesis_max / s3_max), 1),
-        "evidence_score": round(s3_total * (s3_evidence_max / s3_max), 1),
-        "comprehensive_critique": _strip_markdown(raw_hf[:800]),
+        "criterion_scores":      clamped_scores,
+        "criterion_maxes":       criterion_maxes,
+        "s3_total":              s3_total,
+        "comprehensive_critique": critique,
     }
 
 
@@ -952,6 +1135,8 @@ def _build_score_breakdown(
     s3_total: float,
     s3_max: float,
     s3_label: str,
+    criterion_scores: dict,
+    criterion_maxes: dict,
     final_score: int,
     max_score: int,
     classification: str,
@@ -976,6 +1161,18 @@ def _build_score_breakdown(
         f"{'Stage 1':<10} {s1_label:<35} {round(s1_points, 1):>6}  {s1_max:>5}  {pct_bar(s1_points, s1_max)}",
         f"{'Stage 2':<10} {s2_label:<35} {round(s2_coherence, 1):>6}  {s2_max:>5}  {pct_bar(s2_coherence, s2_max)}",
         f"{'Stage 3':<10} {s3_label:<35} {round(s3_total, 1):>6}  {s3_max:>5}  {pct_bar(s3_total, s3_max)}",
+    ]
+
+    # Per-criterion breakdown rows under Stage 3
+    if criterion_scores and criterion_maxes:
+        for name, score in criterion_scores.items():
+            max_pts = criterion_maxes.get(name, 0)
+            indent_name = f"  ↳ {name}"
+            lines.append(
+                f"{'':10} {indent_name:<35} {score:>6}  {max_pts:>5}  {pct_bar(score, max_pts)}"
+            )
+
+    lines += [
         "-" * 75,
         f"{'Total':<10} {'(weighted)':<35} {total_pts:>6}  {'100':>5}",
         "",
@@ -993,29 +1190,31 @@ def _build_score_breakdown(
 
 def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0, enable_stage0: bool = True) -> dict:
     """
-    v5.1 Rubric-aware ensemble grading pipeline.
+    v5.3 Rubric-aware ensemble grading pipeline with per-criterion Stage 3 scoring.
 
     Stage weights are computed from the teacher's actual marking key / rubric.
     Each model grades only the criteria that belong to its specialty:
       Stage 1 (Qwen IELTS)     -> linguistics criteria (grammar, vocabulary, terminology)
       Stage 2 (Qwen coherence) -> coherence criteria   (structure, flow, organisation)
-      Stage 3 (Groq)           -> content criteria     (accuracy, arguments, frameworks, evidence)
+      Stage 3 (Groq)           -> content criteria, scored per criterion individually
 
-    Stage 0 optionally extracts an explicit rubric checklist that Stage 3 verifies.
-    If no rubric/marking key is provided, defaults to 15 / 10 / 75 weights.
+    Stage 3 change (v5.3):
+      Instead of collapsing content criteria into thesis_score + evidence_score,
+      Groq now scores each content criterion by its exact rubric name. The Stage 3
+      total is the sum of those per-criterion scores. The score breakdown header
+      shows one row per criterion so teachers can see exactly where marks were lost.
 
-    v5.1 fixes applied:
-      - cumulative_feedback initialised exactly once (Stage 0 feedback preserved)
-      - Stage 3 JSON keys are generic (thesis_score / evidence_score)
-      - coherence_score field has no misleading "out_of_10" suffix
-      - s3_thesis_max / s3_evidence_max computed once and passed into Stage 3
-      - Partial topic cap enforced in Stage 3 as well as Stage 2
-      - _strip_markdown() applied to all AI free-text in feedback output
+    Stage 0 optionally extracts an explicit rubric checklist that Stage 3 verifies
+    per-criterion.
+
+    If no rubric/marking key is provided, defaults to 15 / 10 / 75 weights and
+    two generic content buckets (Thesis & Argument / Evidence & Accuracy).
     """
     max_score = getattr(assignment, "max_score", None) or 100
 
     master_title        = getattr(assignment, "title", "") or ""
     master_instructions = getattr(assignment, "instructions", "") or ""
+    rubric_content      = getattr(assignment, "rubric_content", "") or ""
     reference_material  = getattr(assignment, "reference_material", "") or ""
 
     if not master_title and prompt:
@@ -1035,17 +1234,12 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     coherence_criteria   = classified.get("coherence", [])
     content_criteria     = classified.get("content", [])
 
-    # Compute Stage 3 split once here and pass into call_gemini_stage3
-    # to avoid dual-computation drift (FIX v5.1)
-    s3_thesis_max   = round(s3_max * 0.507, 0)
-    s3_evidence_max = round(s3_max - s3_thesis_max, 0)
-
-    # cumulative_feedback initialised ONCE here (FIX v5.1 — was reset twice before)
+    # cumulative_feedback initialised ONCE here
     cumulative_feedback = []
 
     stage0_checklist = []
     if enable_stage0:
-        stage0_checklist = extract_stage0_checklist(assignment, content_criteria, reference_material)
+        stage0_checklist = extract_stage0_checklist(assignment, content_criteria, rubric_content)
 
     if stage0_checklist:
         cumulative_feedback.append(
@@ -1067,13 +1261,15 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     s2_label = " & ".join(c["name"] for c in coherence_criteria)   if coherence_criteria   else "Topic Relevance & Coherence"
     s3_label = " & ".join(c["name"] for c in content_criteria)     if content_criteria     else "Thesis, Structure & Evidence"
 
-    print(f"[Pipeline v5.1] Stage weights: S1={s1_max}pts | S2={s2_max}pts | S3={s3_max}pts")
+    print(f"[Pipeline v5.3] Stage weights: S1={s1_max}pts | S2={s2_max}pts | S3={s3_max}pts")
 
     running_points         = 0.0
     hard_off_topic_tripped = False
     s1_points              = 0.0
     s2_coherence_final     = 0.0
     s3_total_final         = 0.0
+    s3_criterion_scores    = {}
+    s3_criterion_maxes     = {}
     classification         = "completely_on_topic"
     is_partially_on_topic  = False
     qwen_data              = {}
@@ -1126,7 +1322,6 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             essay_text, master_title, master_instructions,
             s2_max, coherence_criteria
         )
-        # FIX v5.1: field is now "coherence_score" (no "out_of_10" suffix)
         s2_coherence  = float(qwen_data.get("coherence_score", s2_max * 0.5))
         s2_coherence  = max(0.0, min(s2_max, s2_coherence))
         classification = str(qwen_data.get("relevance_classification", "completely_on_topic")).lower().strip()
@@ -1176,6 +1371,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             s1_points, s1_max, s1_label,
             0.0, s2_max, s2_label,
             0.0, s3_max, s3_label,
+            {}, {},
             final_score, max_score, "completely_off_topic"
         )
 
@@ -1201,45 +1397,49 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         }
 
     # ══════════════════════════════════════════════════════════════
-    # STAGE 3 — CONTENT & LOGIC  (s3_max pts)
+    # STAGE 3 — CONTENT & LOGIC  (s3_max pts, per-criterion)
     # ══════════════════════════════════════════════════════════════
     try:
         gemini_data = call_gemini_stage3(
             essay_text, assignment, word_count,
-            s3_max, s3_thesis_max, s3_evidence_max,
-            content_criteria, reference_material,
+            s3_max,
+            content_criteria,
+            rubric_content=rubric_content,
+            reference_material=reference_material,
             stage0_checklist=stage0_checklist,
             is_partially_on_topic=is_partially_on_topic,
         )
 
-        # FIX v5.1: generic key names
-        s3_thesis   = max(0.0, min(s3_thesis_max,   float(gemini_data.get("thesis_score",   s3_thesis_max   * 0.5))))
-        s3_evidence = max(0.0, min(s3_evidence_max, float(gemini_data.get("evidence_score", s3_evidence_max * 0.5))))
+        s3_criterion_scores = gemini_data.get("criterion_scores", {})
+        s3_criterion_maxes  = gemini_data.get("criterion_maxes", {})
+        s3_total            = gemini_data.get("s3_total", s3_max * 0.5)
 
-        # Partial topic cap enforced here too (FIX v5.1)
-        if is_partially_on_topic:
-            s3_evidence = min(s3_evidence, round(s3_evidence_max * 0.60, 1))
-
-        s3_total       = s3_thesis + s3_evidence
-        s3_total_final = s3_total
+        s3_total_final  = s3_total
         running_points += s3_total
+
+        # Build per-criterion lines for the feedback block
+        criterion_lines = "\n".join(
+            f"  {name:<40}: {score} / {s3_criterion_maxes.get(name, '?')} pts"
+            for name, score in s3_criterion_scores.items()
+        )
 
         s3_fb = (
             f"Stage 3: {s3_label}\n"
             f"Model: Groq (llama-3.3-70b-versatile)\n"
-            f"Thesis Development & Flow    : {s3_thesis} / {s3_thesis_max} pts\n"
-            f"Argument Quality & Evidence  : {s3_evidence} / {s3_evidence_max} pts\n"
+            f"Per-Criterion Scores:\n{criterion_lines}\n"
             f"Stage 3 Total                : {round(s3_total, 1)} / {s3_max} pts\n\n"
             f"Detailed Critique:\n{_strip_markdown(str(gemini_data.get('comprehensive_critique', '')))}\n\n"
             f"{'—' * 60}\n\n"
         )
         cumulative_feedback.append(s3_fb)
-        print(f"Stage 3 complete — {s3_total}/{s3_max} pts")
+        print(f"Stage 3 complete — {s3_total}/{s3_max} pts ({len(s3_criterion_scores)} criteria)")
 
     except Exception as s3_err:
         print(f"Stage 3 failed: {s3_err}. Falling back to Qwen-72B router...")
         try:
-            fallback_prompt = prompt or _build_stage3_fallback_prompt(essay_text, assignment, s3_max)
+            fallback_prompt = prompt or _build_stage3_fallback_prompt(
+                essay_text, assignment, s3_max, content_criteria
+            )
             raw_hf    = call_huggingface(fallback_prompt)
             s3_total  = round(s3_max * 0.50, 1)
             feedback_text = _strip_markdown(raw_hf.strip())
@@ -1247,18 +1447,21 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             try:
                 parsed = clean_and_parse_json(raw_hf)
                 if parsed:
-                    s3_total = min(s3_max, max(0.0, float(parsed.get("score") or parsed.get("total_score") or s3_total)))
-                    feedback_text = _strip_markdown(parsed.get("feedback", feedback_text))
+                    _, clamped = _sum_criterion_scores(parsed, s3_criterion_maxes or {})
+                    if clamped:
+                        s3_criterion_scores = clamped
+                        s3_total = round(sum(clamped.values()), 1)
+                    feedback_text = _strip_markdown(parsed.get("comprehensive_critique", feedback_text))
             except Exception:
                 num_match = re.search(rf"(\d+\.?\d*)\s*/\s*{int(s3_max)}", raw_hf)
                 if num_match:
                     s3_total = min(s3_max, max(0.0, float(num_match.group(1))))
 
-            if is_partially_on_topic:
-                s3_evidence_cap = round(s3_evidence_max * 0.60, 1)
-                s3_e = min(round(s3_total * (s3_evidence_max / s3_max), 1), s3_evidence_cap)
-                s3_t = round(s3_total * (s3_thesis_max / s3_max), 1)
-                s3_total = s3_t + s3_e
+            if is_partially_on_topic and content_criteria and s3_criterion_scores:
+                s3_criterion_scores = _apply_partial_topic_cap(
+                    s3_criterion_scores, s3_criterion_maxes, content_criteria
+                )
+                s3_total = round(sum(s3_criterion_scores.values()), 1)
 
             s3_total_final  = s3_total
             running_points += s3_total
@@ -1286,6 +1489,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         s1_points, s1_max, s1_label,
         s2_coherence_final, s2_max, s2_label,
         s3_total_final, s3_max, s3_label,
+        s3_criterion_scores, s3_criterion_maxes,
         final_scaled_score, max_score, classification
     )
 
@@ -1295,5 +1499,5 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         "off_topic":      False,
         "ai_detected":    False,
         "low_confidence": False,
-        "graded_by":      "ensemble-pipeline-engine-v5.1",
+        "graded_by":      "ensemble-pipeline-engine-v5.3",
     }
