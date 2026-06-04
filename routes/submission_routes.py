@@ -21,6 +21,7 @@ from database import get_db
 from auth_utils import require_student, validate_csrf
 from routes.ai_grader import grade_with_ai
 from routes.grading_prompt import build_grading_prompt
+import googleapiclient.http 
 import models
 
 logger = logging.getLogger("essay_backend.submission")
