@@ -508,7 +508,7 @@ def parse_phi3_stage1_response(raw: str, s1_max: float) -> tuple:
         band         = 5.0
         stage1_score = s1_max * 0.5
 
-    floor = round(s1_max * 0.20, 1)
+    floor = round(s1_max * 0.40, 1)
     stage1_score = max(floor, stage1_score)
 
     feedback = (
@@ -557,8 +557,8 @@ INSTRUCTIONS: {clean_instruct}
 [COHERENCE CRITERIA FROM MARKING KEY]
 {criteria_block}
 
-[STUDENT SUBMISSION — First 2500 characters]
-{essay_text[:2500]}
+[STUDENT SUBMISSION — First 10000 characters]
+{essay_text[:10000]}
 
 [EVALUATION RULES]
 
@@ -806,8 +806,8 @@ Note: evidence_and_logical_validity_score_out_of_37 must be between 0 and {s3_ev
                 s3_total    = s3_thesis + s3_evidence
 
                 # Second-pass for long essays scoring unexpectedly low
-                if word_count >= 600 and s3_total < (s3_max * 0.53):
-                    print(f"⚠️ [Stage 3] Long essay scored low ({s3_total}/{s3_max}) — verification pass...")
+                if s3_total < (s3_max * 0.53):
+                    print(f"⚠️ [Stage 3] Essay scored low ({s3_total}/{s3_max}) — verification pass...")
                     try:
                         parsed2     = _call_groq_once(groq_client, model_name, prompt)
                         s3_thesis2  = max(0.0, min(s3_thesis_max,   float(parsed2.get("structural_and_thesis_score_out_of_38",   s3_thesis_max   * 0.5))))
