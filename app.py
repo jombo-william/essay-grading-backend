@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -6,6 +7,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 # Configure stdout/stderr encoding
 for stream in (sys.stdout, sys.stderr):

@@ -9,6 +9,7 @@ To change min word count      → change the 50 in submit_essay()
 To change how AI score is applied → edit the grading result section
 """
 
+import logging
 import re
 from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Header
@@ -22,6 +23,7 @@ from routes.ai_grader import grade_with_ai
 from routes.grading_prompt import build_grading_prompt
 import models
 
+logger = logging.getLogger("essay_backend.submission")
 router = APIRouter()
 
 
@@ -51,11 +53,6 @@ def _strip_markdown(text: str) -> str:
     result = re.sub(r"^---+\s*$", "", result, flags=re.MULTILINE)
     result = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", result)
     result = re.sub(r"\n{3,}", "\n\n", result)
-    result = re.sub(
-        r"[\U00010000-\U0010ffff\U00002702\U0000270c\U0001FA79\U0001F004\U0001F0CF\U0001F170\U0001F171\U0001F17E\U0001F17F\U0001F18E\U0001F191-\U0001F19A\U0001F201\U0001F202\U0001F21A\U0001F22F\U0001F232-\U0001F23A\U0001F250\U0001F251\U0001F300-\U0001F321\U0001F324-\U0001F32C\U0001F330-\U0001F335\U0001F337-\U0001F37C\U0001F37E-\U0001F393\U0001F3A0-\U0001F3D4\U0001F3E0-\U0001F3F0\U0001F3F3-\U0001F3F5\U0001F3F7-\U0001F4FD\U0001F4FF-\U0001F53D\U0001F549-\U0001F54E\U0001F550-\U0001F567\U0001F56F\U0001F570\U0001F573-\U0001F57A\U0001F587\U0001F58A-\U0001F58D\U0001F590\U0001F595\U0001F596\U0001F5A2\U0001F5A4\U0001F5A5\U0001F5A8\U0001F5B1\U0001F5B2\U0001F5BC\U0001F5C2-\U0001F5C4\U0001F5D1-\U0001F5D3\U0001F5E1\U0001F5E3\U0001F5E8\U0001F5EF\U0001F5F3\U0001F5FA\U0001F600-\U0001F64F\U0001F680-\U0001F6C5\U0001F6CB-\U0001F6D2\U0001F6D5-\U0001F6DC\U0001F6E0-\U0001F6EC\U0001F6F0\U0001F6F3-\U0001F6FA\U0001F7E0-\U0001F7EB\U0001F7F0\U0001F90C-\U0001F93A\U0001F93C-\U0001F945\U0001F947-\U0001F9AF\U0001F9B0-\U0001F9B9\U0001F9C0-\U0001F9C2\U0001F9C4-\U0001F9CA\U0001F9CD-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FA7C\U0001FA80-\U0001FA89\U0001FA8F-\U0001FAC6\U0001FACE-\U0001FADC\U0001FADF-\U0001FAE9\U0001FAF0-\U0001FAF8]",
-        "", result,
-    )
-    result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
 
@@ -65,6 +62,12 @@ def _grade_submission_background(
     student_id:    int,
     essay_text:    str,
 ):
+    logger.info(
+        "Background grading started: submission_id=%s assignment_id=%s student_id=%s",
+        submission_id,
+        assignment_id,
+        student_id,
+    )
     from database import SessionLocal
     from routes.ai_grader import grade_with_ai
     from routes.grading_prompt import build_grading_prompt
@@ -79,8 +82,11 @@ def _grade_submission_background(
         ).first()
 
         if not submission or not assignment:
-            print(f"⚠️ Background grading skipped: submission or assignment not found (sub={submission_id})")
-            return
+                    logger.warning(
+                        "Background grading skipped: submission or assignment not found (submission_id=%s)",
+                        submission_id,
+                    )
+                    return
 
         word_count = len(re.findall(r'\w+', essay_text))
         ai_score = ai_feedback = ai_detection_score = None
@@ -106,43 +112,62 @@ def _grade_submission_background(
                     ai_score           = min(raw_score, cap_score)
                     ai_detection_score = 10
                     ai_feedback        = (
-                        f"Off-topic submission.\n\n"
+                        f"❌ OFF-TOPIC SUBMISSION\n\n"
                         f"The assignment asked: \"{assignment.title}\"\n"
                         f"Your essay does not address this topic.\n\n"
                         f"Score capped at {ai_score}/{assignment.max_score}.\n"
                         f"Please resubmit an essay that directly answers the assignment question."
                     )
-                    print(f"Off-topic — capped at {ai_score}/{assignment.max_score} [{graded_by}]")
+                    logger.info(
+                        "Off-topic grading result: submission_id=%s score=%s graded_by=%s",
+                        submission_id,
+                        ai_score,
+                        graded_by,
+                    )
 
                 elif ai_detected:
                     ai_detection_score = 75
                     ai_score           = raw_score
                     ai_feedback        = (
-                        f"Possible AI-generated content — flagged for teacher review.\n\n"
+                        f"⚠️ Possible AI-generated content — flagged for teacher review.\n\n"
                         f"{str(parsed['feedback']).strip()}"
                     )
-                    print(f"AI content flagged — {ai_score}/{assignment.max_score} [{graded_by}]")
+                    logger.info(
+                        "AI-detected grading result: submission_id=%s score=%s graded_by=%s",
+                        submission_id,
+                        ai_score,
+                        graded_by,
+                    )
 
                 elif low_confidence:
                     ai_detection_score = 10
                     ai_score           = raw_score
                     ai_feedback        = str(parsed["feedback"]).strip()
-                    print(f"Low confidence — {ai_score}/{assignment.max_score} [{graded_by}]")
+                    logger.info(
+                        "Low-confidence grading result: submission_id=%s score=%s graded_by=%s",
+                        submission_id,
+                        ai_score,
+                        graded_by,
+                    )
 
                 else:
                     ai_detection_score = 10
                     ai_score           = raw_score
                     ai_feedback        = str(parsed["feedback"]).strip()
-                    print(f"Graded: {ai_score}/{assignment.max_score} [{graded_by}]")
-
-            if ai_feedback:
-                ai_feedback = _strip_markdown(ai_feedback)
+                    logger.info(
+                        "Successful grading result: submission_id=%s score=%s graded_by=%s",
+                        submission_id,
+                        ai_score,
+                        graded_by,
+                    )
 
         except Exception as e:
-            print(f"All grading methods failed: {e}")
-
+            logger.exception(
+                "All grading methods failed for submission_id=%s",
+                submission_id,
+            )
         submission.ai_score           = ai_score
-        submission.ai_feedback        = ai_feedback
+        submission.ai_feedback        = _strip_markdown(ai_feedback) if ai_feedback else None
         submission.ai_detection_score = ai_detection_score
         submission.status             = "ai_graded" if ai_score is not None else "submitted"
         if ai_score is not None:
@@ -150,7 +175,7 @@ def _grade_submission_background(
         db.commit()
 
     except Exception as e:
-        print(f"⚠️ Background grading task crashed: {e}")
+        logger.exception("Background grading task crashed for submission_id=%s", submission_id)
         db.rollback()
     finally:
         db.close()
@@ -324,6 +349,13 @@ def submit_essay(
     db.commit()
     db.refresh(submission)
 
+    logger.info(
+        "Received submission request: student_id=%s assignment_id=%s word_count=%s submission_id=%s",
+        user.id,
+        assignment_id,
+        word_count,
+        submission.id,
+    )
     background_tasks.add_task(
         _grade_submission_background,
         submission_id = submission.id,

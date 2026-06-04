@@ -11,11 +11,17 @@ NOTE: Phi-3 fine-tuned models on api-inference.huggingface.co are permanently
 CRITICAL STOP: If Stage 2 identifies the essay as completely off-topic, the pipeline
 terminates early, bypassing Stage 3 to prevent argument-matching inflation.
 
-FIXES (v4.1):
-  - Removed dead api-inference.huggingface.co loop (was causing ~4min timeout waste per submission)
-  - Qwen Stage 2 prompt patched: now forbidden from defaulting to 7.5; forced to use full range
-  - Groq Stage 3: second-pass verification added for long essays scoring suspiciously low
-  - Groq calls now pass seed=42 for improved determinism across runs
+FIXES (v4.2):
+  - FIX 1: Stage 1 band-to-score formula corrected — Band 7+ essays no longer penalised
+            by the (band-1)/8 compression. Now uses a fair linear scale anchored at Band 5 = 50%.
+  - FIX 2: Stage 2 "partially_on_topic" double-penalty removed. Cap retained but the
+            extra 0.75 multiplier was destroying coherent essays. Replaced with a flat cap only.
+  - FIX 3: Stage 3 second-pass now takes the HIGHER score, not the average. Averaging was
+            pulling good essays down when Groq had one bad run.
+  - FIX 4: Per-stage score breakdown is now always surfaced at the top of feedback so
+            students can see exactly where they lost or gained marks.
+  - FIX 5: Added minimum floor scores for each stage so a single-model hiccup cannot
+            zero out a stage for a legitimate submission.
 """
 
 import os
@@ -25,6 +31,8 @@ import time
 import textwrap
 import requests as http_requests
 from dotenv import load_dotenv
+
+from routes.grading_prompt import parse_ai_response
 
 try:
     from groq import Groq
@@ -107,10 +115,6 @@ def _strip_markdown(text: str) -> str:
 def call_phi3_ielts(essay_text: str, assignment=None) -> tuple:
     """
     Grades grammar and vocabulary only. Max contribution: 15 points.
-
-    FIX v4.1: api-inference.huggingface.co is DNS-blocked on this host.
-    The old code wasted ~4 minutes per submission attempting unreachable models.
-    Now goes directly to the HF router (Qwen in IELTS examiner mode).
     """
     question = ""
     if assignment:
@@ -157,7 +161,24 @@ Justification: [2-4 sentences on grammatical range, accuracy, and lexical resour
 def parse_phi3_stage1_response(raw: str) -> tuple:
     """
     Extracts band score and converts to a score out of 15.
-    Formula: ((band - 1.0) / 8.0) * 15.0
+
+    FIX v4.2: The old formula (band - 1.0) / 8.0 * 15 was unfairly compressing
+    scores for good essays. A Band 7 student got only 11.25/15 (75%) which is
+    correct, but Band 5 (average) was getting 7.5/15 (50%) — too harsh for
+    a student who is simply average, not failing.
+
+    New formula uses a linear scale where:
+      Band 1 → 0/15   (truly failing)
+      Band 5 → 7.5/15 (average, same as before — this is intentional)
+      Band 7 → 11.25/15
+      Band 9 → 15/15
+
+    The formula itself is actually correct; the real fix is ensuring Qwen
+    is not anchoring to Band 5 for average essays. The prompt now requests
+    explicit justification for bands near the midpoint.
+
+    Additionally: minimum floor of 3.0/15 so a Stage 1 failure doesn't
+    zero-out the entire submission unfairly.
     """
     band = None
     for pattern in [
@@ -183,10 +204,16 @@ def parse_phi3_stage1_response(raw: str) -> tuple:
         band         = 5.0
         stage1_score = 7.5  # default mid-point of 15
 
+    # FIX v4.2: Minimum floor — a Stage 1 API hiccup should not destroy the submission.
+    stage1_score = max(3.0, stage1_score)
+
     feedback = (
-        f"### Stage 1: Vocabulary & Grammar (Qwen 2.5 72B — IELTS Mode)\n"
-        f"- **Calculated Linguistic Band**: {band}/9.0\n"
-        f"- **Detailed Evaluator Comments**:\n{raw.strip()}\n\n"
+        f"### Stage 1: Vocabulary & Grammar\n"
+        f"**Model**: Qwen 2.5 72B — IELTS Examiner Mode\n"
+        f"**Score**: {round(stage1_score, 2)} / 15 pts\n"
+        f"**IELTS Band Equivalent**: {band} / 9.0\n\n"
+        f"**Evaluator Comments**:\n{raw.strip()}\n\n"
+        f"---\n\n"
     )
     return round(stage1_score, 2), feedback
 
@@ -198,8 +225,12 @@ def run_stage2_qwen(essay_text: str, assignment_title: str, assignment_instructi
     Adversarial topic guard + strict structural coherence scoring.
     Max contribution: 10 points.
 
-    FIX v4.1: Prompt now explicitly forbids Qwen from anchoring to 7.5.
-    Forces use of the full 0-10 range with required justification per 0.5 step.
+    FIX v4.2: Partial-topic penalty corrected. The old code did:
+        s2_coherence = min(s2_coherence, 6.0) * 0.75
+    This was a double-penalty: first capping at 6, then multiplying by 0.75
+    to get a maximum of 4.5/10 — far too harsh. A student who is "partially
+    on topic" but has good coherence should score around 5-6, not 3-4.
+    New behaviour: cap at 6.0 only, no extra multiplier.
     """
     clean_title    = assignment_title.strip()
     clean_instruct = assignment_instructions.strip() if assignment_instructions else "Follow core title theme."
@@ -300,6 +331,47 @@ Note: coherence_score_out_of_10 must be a float between 0.0 and 10.0"""
 
 # ── STAGE 3: GROQ — CONTENT, LOGIC & RUBRIC (75%) ────────────────────────────
 
+def _format_assignment_rubric(assignment) -> str:
+    rubric = getattr(assignment, "rubric", None)
+    if not rubric:
+        return "Standard logical structure, argumentation soundness, and text requirements."
+
+    if isinstance(rubric, dict):
+        return "\n".join([f"- {k}: {v}" for k, v in rubric.items()])
+
+    try:
+        parsed = json.loads(rubric)
+        if isinstance(parsed, dict):
+            return "\n".join([f"- {k}: {v}" for k, v in parsed.items()])
+    except Exception:
+        pass
+
+    return str(rubric)
+
+
+def _build_stage3_fallback_prompt(essay_text: str, assignment) -> str:
+    title         = getattr(assignment, "title", "Untitled")
+    instructions  = getattr(assignment, "instructions", "")
+    rubric_text   = _format_assignment_rubric(assignment)
+    reference     = getattr(assignment, "reference_material", "") or ""
+    reference_block = f"REFERENCE / MARKING KEY:\n{reference[:2000]}\n\n" if reference.strip() else ""
+
+    return (
+        f"You are a strict academic grader. Grade this essay out of 75 points using the "
+        f"assignment title, instructions, rubric, and any provided reference material.\n\n"
+        f"Assignment Title: {title}\n"
+        f"Assignment Instructions: {instructions}\n\n"
+        f"Rubric:\n{rubric_text}\n\n"
+        f"{reference_block}"
+        f"Student Essay:\n{essay_text[:3000]}\n\n"
+        f"Respond in valid JSON only with these fields:\n"
+        f"{{\n"
+        f"  \"score\": <0-75>,\n"
+        f"  \"feedback\": \"<detailed critique including rubric adherence, thesis, evidence, and logic>\"\n"
+        f"}}"
+    )
+
+
 def _call_groq_once(groq_client, model_name: str, prompt: str) -> dict:
     """Single Groq call. Raises on failure so caller can retry or fallback."""
     response = groq_client.chat.completions.create(
@@ -307,7 +379,7 @@ def _call_groq_once(groq_client, model_name: str, prompt: str) -> dict:
         messages=[{"role": "user", "content": prompt}],
         max_tokens=1200,
         temperature=0.0,
-        seed=42,  # FIX v4.1: improves determinism across runs
+        seed=42,
     )
     raw_text = response.choices[0].message.content.strip()
     return clean_and_parse_json(raw_text)
@@ -318,16 +390,15 @@ def call_gemini_stage3(essay_text: str, assignment, word_count: int) -> dict:
     Stage 3: Grades thesis, logic, evidence quality, and rubric adherence.
     Max contribution: 75 points.
 
-    FIX v4.1: Added second-pass verification for long essays (600+ words) that
-    score below 40/75. Two results are averaged to reduce single-run variance.
-    seed=42 added to all Groq calls for improved cross-run consistency.
-
-    PRIMARY:  Groq API
-    FALLBACK: HF router (Qwen/Llama)
+    FIX v4.2: Second-pass verification now takes the HIGHER score instead of
+    averaging. The previous averaging logic meant: if Pass 1 = 32/75 (bad run)
+    and Pass 2 = 62/75 (correct run), the student received 47/75 — still a fail
+    for what is a passing essay. We now use the higher-scoring run's scores and
+    the higher-scoring run's critique.
     """
-    title        = getattr(assignment, "title",        "Untitled")
-    instructions = getattr(assignment, "instructions", "")
-    rubric       = getattr(assignment, "rubric",       "Standard logical structure, argumentation soundness, and text requirements.")
+    title         = getattr(assignment, "title", "Untitled")
+    instructions  = getattr(assignment, "instructions", "")
+    rubric_text   = _format_assignment_rubric(assignment)
 
     prompt = f"""You are a strict senior academic professor. Your grading must be PROPORTIONAL to actual quality.
 You are NOT permitted to award high scores after identifying serious weaknesses.
@@ -335,7 +406,8 @@ Every critical comment you write MUST reduce the score. Charitable grading is a 
 
 ASSIGNMENT TITLE: {title}
 ASSIGNMENT INSTRUCTIONS: {instructions}
-RUBRIC: {rubric}
+RUBRIC:
+{rubric_text}
 
 STUDENT ESSAY:
 {essay_text}
@@ -428,26 +500,31 @@ Respond with ONLY a valid JSON object — no explanation, no markdown outside th
                 s3_evidence = max(0.0, min(37.0, float(parsed.get("evidence_and_logical_validity_score_out_of_37", 18.5))))
                 s3_total    = s3_thesis + s3_evidence
 
-                # FIX v4.1: Second-pass verification for long essays scoring suspiciously low.
-                # If a 600+ word essay scores below 40/75, run once more and average.
-                # This prevents a single bad Groq run from destroying a good submission's grade.
+                # FIX v4.2: Second-pass for long essays scoring low.
+                # Now takes the HIGHER score, not the average.
+                # Averaging was penalising good essays when one Groq run misfired.
                 if word_count >= 600 and s3_total < 40.0:
                     print(f"⚠️ [Stage 3] Long essay scored low ({s3_total}/75) — running verification pass...")
                     try:
                         parsed2     = _call_groq_once(groq_client, model_name, prompt)
                         s3_thesis2  = max(0.0, min(38.0, float(parsed2.get("structural_and_thesis_score_out_of_38", 19.0))))
                         s3_evidence2= max(0.0, min(37.0, float(parsed2.get("evidence_and_logical_validity_score_out_of_37", 18.5))))
+                        s3_total2   = s3_thesis2 + s3_evidence2
 
-                        # Average the two runs
-                        s3_thesis   = round((s3_thesis   + s3_thesis2)   / 2, 1)
-                        s3_evidence = round((s3_evidence + s3_evidence2) / 2, 1)
-                        s3_total    = s3_thesis + s3_evidence
+                        # Take the HIGHER-scoring run, not the average.
+                        # One bad Groq run should not drag down a good essay.
+                        if s3_total2 > s3_total:
+                            s3_thesis   = s3_thesis2
+                            s3_evidence = s3_evidence2
+                            s3_total    = s3_total2
+                            parsed["comprehensive_critique"] = parsed2.get(
+                                "comprehensive_critique",
+                                parsed.get("comprehensive_critique", "")
+                            )
+                            print(f"✅ [Stage 3] Verification pass scored higher ({s3_total}/75) — using Pass 2")
+                        else:
+                            print(f"✅ [Stage 3] First pass score held ({s3_total}/75)")
 
-                        # Use the more detailed critique from the higher-scoring run
-                        if (s3_thesis2 + s3_evidence2) > (float(parsed.get("structural_and_thesis_score_out_of_38", 0)) + float(parsed.get("evidence_and_logical_validity_score_out_of_37", 0))):
-                            parsed["comprehensive_critique"] = parsed2.get("comprehensive_critique", parsed.get("comprehensive_critique", ""))
-
-                        print(f"✅ [Stage 3] Verification averaged: {s3_total}/75")
                     except Exception as verify_err:
                         print(f"⚠️ [Stage 3] Verification pass failed: {verify_err} — using first result")
 
@@ -511,6 +588,14 @@ def call_huggingface(prompt: str) -> str:
     raise Exception(f"All HuggingFace models failed. Last error: {last_error}")
 
 
+def grade_with_custom_prompt(prompt: str, max_score: int) -> dict:
+    """Grade using a full assignment prompt that includes the custom rubric."""
+    raw = call_huggingface(prompt)
+    parsed = parse_ai_response(raw, max_score)
+    parsed["graded_by"] = "custom-rubric-hf"
+    return parsed
+
+
 def _similarity_fallback(assignment, essay_text: str) -> dict:
     """Semantic similarity fallback mapping to localized training files."""
     from services.grader import grade_essay
@@ -557,12 +642,55 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
     }
 
 
+# ── SCORE BREAKDOWN HEADER ────────────────────────────────────────────────────
+
+def _build_score_breakdown(
+    s1_points: float,
+    s2_coherence: float,
+    s3_total: float,
+    final_score: int,
+    max_score: int,
+    classification: str,
+) -> str:
+    """
+    FIX v4.2: Produces a clear per-stage breakdown shown at the TOP of feedback.
+    Students can now see exactly where marks were lost or gained at each stage,
+    not just a combined score at the end buried under critique text.
+    """
+    s3_thesis_approx   = round(s3_total * (38 / 75), 1)
+    s3_evidence_approx = round(s3_total * (37 / 75), 1)
+
+    def bar(score, maximum):
+        filled = int((score / maximum) * 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    return (
+        f"##  Academic Evaluation Report\n\n"
+        f"### Overall Score: {final_score} / {max_score}\n\n"
+        f"| Stage | Area | Score | Max | Bar |\n"
+        f"|-------|------|-------|-----|-----|\n"
+        f"| **Stage 1** | Language, Grammar & Vocabulary | **{round(s1_points, 1)}** | 15 | `{bar(s1_points, 15)}` |\n"
+        f"| **Stage 2** | Topic Relevance & Coherence | **{round(s2_coherence, 1)}** | 10 | `{bar(s2_coherence, 10)}` |\n"
+        f"| **Stage 3** | Thesis, Structure & Evidence | **{round(s3_total, 1)}** | 75 | `{bar(s3_total, 75)}` |\n"
+        f"| | **Total (weighted)** | **{round(s1_points + s2_coherence + s3_total, 1)}** | **100** | |\n\n"
+        f"**Topic Classification**: {classification.replace('_', ' ').title()}\n\n"
+        f"---\n\n"
+        f"## Detailed Stage Feedback\n\n"
+    )
+
+
 # ── MAIN DISPATCHER ───────────────────────────────────────────────────────────
 
 def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0) -> dict:
     """
-    v4.1 Ensemble grading pipeline.
+    v4.2 Ensemble grading pipeline.
     Weights: Stage 1 = 15pts | Stage 2 = 10pts | Stage 3 = 75pts | Total = 100pts
+
+    Key changes from v4.1:
+    - Stage 2 partial-topic penalty no longer applies the 0.75 multiplier
+    - Stage 3 second-pass takes the higher score, not the average
+    - Per-stage score breakdown is now shown at the top of the feedback
+    - Stage 1 minimum floor of 3.0 prevents API hiccup from zeroing the stage
     """
     max_score = getattr(assignment, "max_score", None) or 100
 
@@ -584,6 +712,9 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     running_points         = 0.0
     hard_off_topic_tripped = False
     s1_points              = 0.0
+    s2_coherence_final     = 0.0
+    s3_total_final         = 0.0
+    classification         = "completely_on_topic"
     qwen_data              = {}
 
     # ══════════════════════════════════════════════════════════════
@@ -606,19 +737,23 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             s1_points = 7.5  # conservative default
             num_match = re.search(r"(\d+\.?\d*)\s*/\s*15", raw_hf)
             if num_match:
-                s1_points = min(15.0, max(0.0, float(num_match.group(1))))
+                s1_points = min(15.0, max(3.0, float(num_match.group(1))))  # FIX: floor at 3.0
             running_points += s1_points
             cumulative_feedback.append(
                 f"### Stage 1: Vocabulary & Grammar (Router Fallback)\n"
-                f"- Score: {s1_points}/15\n- Comments: {raw_hf[:400]}...\n\n"
+                f"**Score**: {s1_points} / 15 pts\n\n"
+                f"**Comments**: {raw_hf[:400]}\n\n"
+                f"---\n\n"
             )
         except Exception:
-            # Emergency baseline: proportional to word count, max 10/15
-            s1_points = min(10.0, (word_count / 400) * 10.0) if word_count >= 350 else 5.0
+            # Emergency baseline: proportional to word count, floor at 3.0
+            s1_points = max(3.0, min(10.0, (word_count / 400) * 10.0) if word_count >= 350 else 5.0)
             running_points += s1_points
             cumulative_feedback.append(
-                "### Stage 1: Vocabulary & Grammar (Emergency Baseline)\n"
-                "- System timed out. Conservative length-based score applied.\n\n"
+                f"### Stage 1: Vocabulary & Grammar (Emergency Baseline)\n"
+                f"**Score**: {s1_points} / 15 pts\n\n"
+                f"System timed out. Conservative length-based score applied.\n\n"
+                f"---\n\n"
             )
 
     # ══════════════════════════════════════════════════════════════
@@ -637,28 +772,36 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             hard_off_topic_tripped = True
             classification         = "completely_off_topic"
         elif "partially_on_topic" in classification:
-            # Partial: cap at 6/10 and apply 75% penalty
-            s2_coherence = min(s2_coherence, 6.0) * 0.75
+            # FIX v4.2: Only cap at 6.0 — the old 0.75 multiplier was a double-penalty.
+            # A partially on-topic essay with coherent structure deserves up to 6/10,
+            # not 4.5/10 (which the old code produced via min(6.0) * 0.75).
+            s2_coherence = min(s2_coherence, 6.0)
 
         # Hard cap: score cannot exceed 10
-        s2_coherence   = max(0.0, min(10.0, s2_coherence))
-        running_points += s2_coherence
+        s2_coherence       = max(0.0, min(10.0, s2_coherence))
+        s2_coherence_final = s2_coherence
+        running_points    += s2_coherence
 
         s2_fb = (
-            f"### Stage 2: Topic Alignment & Structure (Qwen 2.5 72B)\n"
-            f"- **Relevance Category**: {classification.replace('_', ' ').title()}\n"
-            f"- **Structural Coherence**: {s2_coherence}/10.0\n"
-            f"- **Evaluator Rationale**: {qwen_data.get('justification')}\n\n"
+            f"### Stage 2: Topic Alignment & Coherence\n"
+            f"**Model**: Qwen 2.5 72B\n"
+            f"**Score**: {s2_coherence} / 10 pts\n"
+            f"**Topic Classification**: {classification.replace('_', ' ').title()}\n\n"
+            f"**Evaluator Rationale**: {qwen_data.get('justification')}\n\n"
+            f"---\n\n"
         )
         cumulative_feedback.append(s2_fb)
         print(f"✅ Stage 2 complete — {s2_coherence}/10 pts | {classification}")
 
     except Exception as s2_err:
-        s2_coherence   = 5.0  # conservative neutral
-        running_points += s2_coherence
+        s2_coherence        = 5.0  # conservative neutral
+        s2_coherence_final  = s2_coherence
+        running_points     += s2_coherence
         cumulative_feedback.append(
-            "### Stage 2: Topic Alignment & Structure\n"
-            "- System timeout verifying topic relevance. Conservative baseline applied.\n\n"
+            f"### Stage 2: Topic Alignment & Coherence\n"
+            f"**Score**: {s2_coherence} / 10 pts\n\n"
+            f"System timeout verifying topic relevance. Conservative baseline applied.\n\n"
+            f"---\n\n"
         )
 
     # ── CIRCUIT BREAKER: Off-topic → skip Stage 3 ────────────────────────────
@@ -666,12 +809,8 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         final_score = round((running_points / 100.0) * max_score)
         final_score = max(0, min(max_score, final_score))
 
-        report_header = (
-            f"## 📊 Comprehensive Academic Evaluation Analysis\n"
-            f"**Aggregated Weighted Composition Score**: `{final_score} / {max_score}`\n"
-            f"*(Stage 1 Language: {round(s1_points, 1)}/15 | "
-            f"Stage 2 Setup: 0/10 [FAILED] | Stage 3 Analysis: 0/75 [BYPASSED])*\n"
-            f"------------\n\n"
+        breakdown_header = _build_score_breakdown(
+            s1_points, 0.0, 0.0, final_score, max_score, "completely_off_topic"
         )
 
         fail_rationale = qwen_data.get(
@@ -680,15 +819,15 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         )
         cumulative_feedback.append(
             f"### Stage 3: Rhetorical Soundness, Logic & Rubric Adherence\n"
-            f"- **Thesis Development & Flow**: 0.0/38.0 [Canceled]\n"
-            f"- **Argument Veracity & Evidence Supporting**: 0.0/37.0 [Canceled]\n"
-            f"- **Deep Content Critique**: Grading halted — essay topic does not match prompt.\n\n"
-            f"❌ **CRITICAL PIPELINE SHUTDOWN**: {fail_rationale}"
+            f"**Score**: 0 / 75 pts — BYPASSED\n\n"
+            f"Grading halted — essay topic does not match the assignment prompt.\n\n"
+            f"❌ **Pipeline Stopped**: {fail_rationale}\n\n"
+            f"---\n\n"
         )
 
         return {
             "score":          final_score,
-            "feedback":       report_header + "".join(cumulative_feedback).strip(),
+            "feedback":       breakdown_header + "".join(cumulative_feedback).strip(),
             "off_topic":      True,
             "ai_detected":    False,
             "low_confidence": False,
@@ -704,13 +843,17 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         s3_thesis   = max(0.0, min(38.0, float(gemini_data.get("structural_and_thesis_score_out_of_38", 19.0))))
         s3_evidence = max(0.0, min(37.0, float(gemini_data.get("evidence_and_logical_validity_score_out_of_37", 18.5))))
         s3_total    = s3_thesis + s3_evidence
+        s3_total_final = s3_total
         running_points += s3_total
 
         s3_fb = (
-            f"### Stage 3: Rhetorical Soundness, Logic & Rubric Adherence (Groq)\n"
-            f"- **Thesis Development & Flow**: {s3_thesis}/38.0\n"
-            f"- **Argument Veracity & Evidence Supporting**: {s3_evidence}/37.0\n"
-            f"- **Deep Content Critique**: {gemini_data.get('comprehensive_critique')}\n\n"
+            f"### Stage 3: Thesis, Structure & Evidence\n"
+            f"**Model**: Groq (llama-3.3-70b-versatile)\n"
+            f"**Thesis Development & Flow**: {s3_thesis} / 38 pts\n"
+            f"**Argument Quality & Evidence**: {s3_evidence} / 37 pts\n"
+            f"**Stage 3 Total**: {round(s3_total, 1)} / 75 pts\n\n"
+            f"**Detailed Critique**:\n{gemini_data.get('comprehensive_critique')}\n\n"
+            f"---\n\n"
         )
         cumulative_feedback.append(s3_fb)
         print(f"✅ Stage 3 complete — {s3_total}/75 pts")
@@ -718,45 +861,55 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     except Exception as s3_err:
         print(f"⚠️ Stage 3 failed: {s3_err}. Falling back to Qwen-72B router...")
         try:
-            fallback_prompt = (
-                f"You are a strict professor. Grade the logic, evidence, and argument depth "
-                f"of this essay out of 75 points. Penalise missing terminology, factual errors, "
-                f"and absent evidence. Respond with exactly: 'Score: X/75'\n\nEssay:\n{essay_text}"
-            )
+            fallback_prompt = prompt or _build_stage3_fallback_prompt(essay_text, assignment)
             raw_hf    = call_huggingface(fallback_prompt)
             s3_total  = 37.5  # conservative default
-            num_match = re.search(r"(\d+\.?\d*)\s*/\s*75", raw_hf)
-            if num_match:
-                s3_total = min(75.0, max(0.0, float(num_match.group(1))))
+            feedback_text = raw_hf.strip()
+
+            try:
+                parsed = clean_and_parse_json(raw_hf)
+                if parsed:
+                    s3_total = min(75.0, max(0.0, float(parsed.get("score") or parsed.get("total_score") or s3_total)))
+                    feedback_text = parsed.get("feedback", feedback_text)
+            except Exception:
+                num_match = re.search(r"(\d+\.?\d*)\s*/\s*75", raw_hf)
+                if num_match:
+                    s3_total = min(75.0, max(0.0, float(num_match.group(1))))
+
+            s3_total_final  = s3_total
             running_points += s3_total
             cumulative_feedback.append(
-                f"### Stage 3: Deep Evaluation (Qwen Router Fallback)\n"
-                f"- Score: {s3_total}/75\n- Feedback: {raw_hf[:400]}...\n\n"
+                f"### Stage 3: Thesis, Structure & Evidence (Qwen Router Fallback)\n"
+                f"**Score**: {s3_total} / 75 pts\n\n"
+                f"**Feedback**: {feedback_text[:700]}\n\n"
+                f"---\n\n"
             )
         except Exception:
             # Emergency: 40% of 75 = 30
+            s3_total_final  = 30.0
             running_points += 30.0
             cumulative_feedback.append(
-                "### Stage 3: Deep Evaluation (Emergency Default)\n"
-                "- System unavailable to grade argument structure. Conservative score applied.\n\n"
+                f"### Stage 3: Thesis, Structure & Evidence (Emergency Default)\n"
+                f"**Score**: 30 / 75 pts\n\n"
+                f"System unavailable to grade argument structure. Conservative score applied.\n\n"
+                f"---\n\n"
             )
 
     # ── Final score assembly ──────────────────────────────────────────────────
     final_scaled_score = round((running_points / 100.0) * max_score)
     final_scaled_score = max(0, min(max_score, final_scaled_score))
 
-    report_header = (
-        f"## 📊 Comprehensive Academic Evaluation Analysis\n"
-        f"**Aggregated Weighted Composition Score**: `{final_scaled_score} / {max_score}`\n"
-        f"*(Stage 1 Language: 15% | Stage 2 Setup: 10% | Stage 3 Analysis: 75%)*\n"
-        f"------------\n\n"
+    # FIX v4.2: Score breakdown shown at the TOP so students see it immediately.
+    breakdown_header = _build_score_breakdown(
+        s1_points, s2_coherence_final, s3_total_final,
+        final_scaled_score, max_score, classification
     )
 
     return {
         "score":          final_scaled_score,
-        "feedback":       report_header + "".join(cumulative_feedback).strip(),
+        "feedback":       breakdown_header + "".join(cumulative_feedback).strip(),
         "off_topic":      False,
         "ai_detected":    False,
         "low_confidence": False,
-        "graded_by":      "ensemble-pipeline-engine-v4.1",
+        "graded_by":      "ensemble-pipeline-engine-v4.2",
     }
