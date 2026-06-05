@@ -1,6 +1,6 @@
 # routes/ai_grader.py
 """
-ENSEMBLE GRADING CHAIN v5.3 — PER-CRITERION SCORING
+ENSEMBLE GRADING CHAIN v5.4 — PER-CRITERION SCORING
 ═══════════════════════════════════════════════════════════
 
 FIXED IN v5.1:
@@ -16,6 +16,17 @@ FIXED IN v5.1:
             before they are embedded in feedback (no raw markdown in output)
   - FIX 7: classify_rubric_criteria() adds a comment explaining silent linguistics-first
             priority when a criterion matches both buckets
+
+NEW IN v5.4:
+  - Strategy 6 added to parse_marking_key_from_reference():
+    Handles flat continuous text produced by pdfjs extractor (no newlines).
+    pdfjs joins all PDF text items with spaces into one long line per page,
+    causing Strategies 1-5 (all newline-dependent) to silently fail and the
+    pipeline to fall back to default 15/10/75 weights + thesis/evidence scoring
+    (manifesting as 19.2/35.8 Stage 3 scores when a real rubric PDF is uploaded).
+    Strategy 6 finds mark anchors (digit + UPPERCASE word) in the flat string,
+    walks backwards to collect title-case criterion names, and slices forward
+    for descriptors.
 
 NEW IN v5.3:
   - Stage 3 scores EACH content criterion individually, not as a
@@ -33,13 +44,13 @@ NEW IN v5.3:
 NEW IN v5.2:
   - rubric_content (marking key) and reference_material (study docs) are now
     read as SEPARATE fields matching the new AssignmentForm layout:
-      assignment.rubric_content    → marking key / grading rubric
-      assignment.reference_material → reference books, notes, study material
+      assignment.rubric_content    -> marking key / grading rubric
+      assignment.reference_material -> reference books, notes, study material
   - Stage 0 uses ONLY rubric_content for checklist extraction (cleaner signal)
   - Stage 3 receives rubric_content as primary grading anchor and
     reference_material as secondary context (labelled separately in prompt)
   - _build_stage3_fallback_prompt updated with same split
-  - resolve_stage_weights already correct (reads rubric_content) — no change
+  - resolve_stage_weights already correct (reads rubric_content) -- no change
 
 PRESERVED FROM v5.0:
   - Dynamic stage weight extraction from rubric / reference material
@@ -96,9 +107,9 @@ HF_MODELS = [
     },
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # KEYWORD SETS FOR BUCKET CLASSIFICATION
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _LINGUISTICS_KEYWORDS = {
     "grammar", "vocabulary", "vocab", "terminology", "spelling", "language",
@@ -111,7 +122,7 @@ _COHERENCE_KEYWORDS = {
     "structure", "coherence", "flow", "organisation", "organization",
     "format", "clarity", "paragraphing", "transitions", "layout",
     "logical order", "sequencing", "structure & coherence",
-    # Note: "introduction" and "conclusion" removed — too broad,
+    # Note: "introduction" and "conclusion" removed -- too broad,
     # would incorrectly catch "introduction of examples" etc.
     # "Real-World Examples", "evidence", "examples" -> content bucket
 }
@@ -119,9 +130,9 @@ _COHERENCE_KEYWORDS = {
 # Everything else -> content/logic bucket (Groq)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # UTILITY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def clean_and_parse_json(raw_str: str) -> dict:
     cleaned = raw_str.strip()
@@ -153,9 +164,9 @@ def _strip_markdown(text: str) -> str:
     return result.strip()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # RUBRIC PARSING & DYNAMIC ROUTING
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _normalise_to_weights(criteria: list[dict]) -> list[dict]:
     """
@@ -167,11 +178,11 @@ def _normalise_to_weights(criteria: list[dict]) -> list[dict]:
     total = sum(c["weight"] for c in criteria)
     if total <= 0:
         return criteria
-    # Already percentages — no conversion needed
+    # Already percentages -- no conversion needed
     if abs(total - 100.0) <= 2.0:
         return criteria
-    # Raw marks — normalise to percentages
-    print(f"[RubricParser] Raw marks detected (sum={total}) — normalising to %")
+    # Raw marks -- normalise to percentages
+    print(f"[RubricParser] Raw marks detected (sum={total}) -- normalising to %")
     for c in criteria:
         c["weight"] = round(c["weight"] / total * 100.0, 2)
         c["raw_mark"] = c.get("raw_mark", c["weight"])   # preserve original
@@ -182,34 +193,37 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
     """
     Extracts grading criteria from free-text marking key / rubric.
 
-    Handles ALL common teacher formats — no specific template required:
+    Handles ALL common teacher formats -- no specific template required:
 
-      Format A — Markdown table with %:
+      Format A -- Markdown table with %:
         | Content & Accuracy | 25% | Correct identification... |
 
-      Format B — Markdown table with raw marks:
+      Format B -- Markdown table with raw marks:
         | Task Achievement | 10 | Accurate scientific content... |
 
-      Format C — Plain table (PDF-extracted, spaces/tabs):
+      Format C -- Plain table (PDF-extracted, spaces/tabs):
         Task Achievement   10   Accurate and relevant scientific content
         Coherence          10   Clear introduction, body, conclusion
 
-      Format D — Percentage lines:
+      Format D -- Percentage lines:
         Content & Accuracy   25%   Correct identification...
 
-      Format E — Simple colon/dash format:
+      Format E -- Simple colon/dash format:
         Content & Accuracy: 25%
         Grammar - 15%
 
-      Format F — "X marks" or "X / Y" inline:
+      Format F -- "X marks" or "X / Y" inline:
         Task Achievement (10 marks): Accurate scientific content
         Grammar /Style (10/40): Grammatical accuracy
+
+      Format G -- Flat continuous text (pdfjs extractor output):
+        Task Achievement / Content 25 Accurate and relevant... Coherence 25 Clear...
 
     Returns:
         [{"name": str, "weight": float, "descriptor": str, "raw_mark": float|None}]
         weights are always percentages (normalised if raw marks were given)
 
-    Returns [] if no criteria found — caller falls back to rubric dict or defaults.
+    Returns [] if no criteria found -- caller falls back to rubric dict or defaults.
     """
     if not reference_material or not reference_material.strip():
         return []
@@ -240,7 +254,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
             "raw_mark":  raw_mark,
         })
 
-    # ── Strategy 1A: Markdown table — percentage weights ─────────────────────
+    # -- Strategy 1A: Markdown table -- percentage weights ---------------------
     # | Criterion Name | 25% | descriptor |
     pat_md_pct = re.compile(
         r"\|\s*([^|]{3,60}?)\s*\|\s*(\d+(?:\.\d+)?)\s*%\s*\|([^|]*)",
@@ -256,7 +270,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 1A (markdown table %): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 1B: Markdown table — raw marks ───────────────────────────────
+    # -- Strategy 1B: Markdown table -- raw marks -----------------------------
     # | Criterion Name | 10 | descriptor |
     pat_md_raw = re.compile(
         r"\|\s*([^|]{3,60}?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|([^|]*)",
@@ -277,7 +291,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 1B (markdown table raw marks): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 2A: Plain table — raw marks (PDF-style, spaces/tabs) ─────────
+    # -- Strategy 2A: Plain table -- raw marks (PDF-style, spaces/tabs) -------
     # Task Achievement   10   Accurate and relevant scientific content
     # Coherence          10   Clear introduction, body, conclusion
     pat_plain_raw = re.compile(
@@ -294,7 +308,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 2A (plain table raw marks): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 2B: Plain lines — percentage weights ─────────────────────────
+    # -- Strategy 2B: Plain lines -- percentage weights -----------------------
     # Content & Accuracy   25%   Correct identification...
     pat_plain_pct = re.compile(
         r"^([A-Za-z][^\n%]{4,60}?)\s{2,}(\d+(?:\.\d+)?)\s*%\s*(.*)?$",
@@ -310,7 +324,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 2B (plain lines %): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 3A: Inline marks — "Criterion (X marks): desc" ──────────────
+    # -- Strategy 3A: Inline marks -- "Criterion (X marks): desc" -------------
     # Task Achievement (10 marks): Accurate scientific content
     pat_inline_marks = re.compile(
         r"([A-Za-z][^\n(]{3,55}?)\s*\((\d+)\s*marks?\)\s*[:\-]?\s*(.*)",
@@ -324,7 +338,7 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 3A (inline marks): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 3B: Inline fraction — "Criterion (X/Y): desc" ───────────────
+    # -- Strategy 3B: Inline fraction -- "Criterion (X/Y): desc" -------------
     # Grammar /Style (10/40): Grammatical accuracy
     pat_inline_frac = re.compile(
         r"([A-Za-z][^\n(/]{3,55}?)\s*\((\d+)\s*/\s*(\d+)\)\s*[:\-]?\s*(.*)",
@@ -338,9 +352,9 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 3B (inline fraction): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 4: Simple colon/dash — "Name: 25%" or "Name - 15%" ──────────
+    # -- Strategy 4: Simple colon/dash -- "Name: 25%" or "Name - 15%" --------
     pat_simple = re.compile(
-        r"([A-Za-z &/,\-]{4,60}?)[:\-–]\s*(\d+(?:\.\d+)?)\s*%",
+        r"([A-Za-z &/,\-]{4,60}?)[:\-\u2013]\s*(\d+(?:\.\d+)?)\s*%",
         re.MULTILINE
     )
     for m in pat_simple.finditer(reference_material):
@@ -352,14 +366,14 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 4 (simple colon/dash): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    # ── Strategy 5: Line-wrapped PDF table (two-pass) ────────────────────────
+    # -- Strategy 5: Line-wrapped PDF table (two-pass) ------------------------
     # Handles PDF-extracted rubric tables where criterion names are split across
     # multiple lines and the mark appears at the start of the line containing
     # the descriptor:
-    #   Task Achievement        ← name line 1
-    #   / Content               ← name line 2
-    #   10 Accurate and...      ← mark + descriptor start
-    #   covers energy...        ← descriptor continuation
+    #   Task Achievement        <- name line 1
+    #   / Content               <- name line 2
+    #   10 Accurate and...      <- mark + descriptor start
+    #   covers energy...        <- descriptor continuation
     HEADER_SKIP = {
         'criterion', 'marks', 'what to look for', 'scoring rubric', 'total',
         'band', 'performance', 'descriptor', 'score range', 'grade',
@@ -430,7 +444,75 @@ def parse_marking_key_from_reference(reference_material: str) -> list[dict]:
         print(f"[RubricParser] Strategy 5 (line-wrapped PDF table): {len(criteria)} criteria")
         return _normalise_to_weights(criteria)
 
-    print("[RubricParser] No structured criteria found — will use rubric dict or defaults")
+    # -- Strategy 6: Flat continuous text (pdfjs extractor output) ------------
+    #
+    # pdfjs joins all PDF text items with spaces, producing one long line with
+    # no newlines between criteria. Strategies 1-5 all rely on \n separators
+    # and silently return zero criteria, causing the pipeline to fall back to
+    # the hardcoded 15/10/75 default split -- which manifests as the wrong
+    # Stage 3 scores (e.g. 19.2/35.8) regardless of the actual rubric.
+    #
+    # This strategy locates "mark anchors": positions where a standalone number
+    # is immediately followed by an uppercase letter (e.g. "25 Accurate").
+    # For each anchor it:
+    #   1. Walks BACKWARDS through whitespace-split words to collect the
+    #      criterion name (title-case words immediately preceding the mark,
+    #      stopping at numbers, sentence terminators, or after 6 words).
+    #   2. Slices FORWARDS from the anchor to the next anchor (or +300 chars)
+    #      to collect the descriptor text.
+    #
+    # Example flat input:
+    #   "Task Achievement / Content 25 Accurate and relevant... Coherence 25 Clear..."
+    # Yields:
+    #   {"name": "Task Achievement / Content", "weight": 25.0, ...}
+    #   {"name": "Coherence",                  "weight": 25.0, ...}
+    pat_flat_anchor = re.compile(
+        r'(?<!\d)(\d{1,3}(?:\.\d+)?)\s+([A-Z][a-z])',
+        re.MULTILINE
+    )
+    flat_anchors = [
+        (m.start(), float(m.group(1)), m.start(2))
+        for m in pat_flat_anchor.finditer(reference_material)
+        if float(m.group(1)) <= 200
+    ]
+
+    if len(flat_anchors) >= 2:
+        for idx, (anchor_pos, mark, desc_start) in enumerate(flat_anchors):
+            # Collect title-case words immediately before this anchor.
+            # Walk backwards; stop at numbers, sentence terminators, or 6 words.
+            preceding = reference_material[:anchor_pos].rstrip()
+            name_words = []
+            for word in reversed(preceding.split()):
+                # Stop at numbers or punctuation-only tokens
+                if re.match(r'^[\d.,%]+$', word):
+                    break
+                # Hard cap: criterion names are never more than 6 words
+                if len(name_words) >= 6:
+                    break
+                # Stop at sentence terminators once we have at least 2 words
+                if re.search(r'[.!?]$', word) and len(name_words) >= 2:
+                    break
+                name_words.insert(0, word)
+
+            raw_name = ' '.join(name_words).strip()
+            # Strip trailing punctuation artifacts (colons, dashes, slashes)
+            raw_name = re.sub(r'[:\-\u2013/|]+$', '', raw_name).strip()
+
+            if not raw_name or len(raw_name) < 3:
+                continue
+
+            # Descriptor: text from desc_start to the next anchor (or 300 chars)
+            next_pos = flat_anchors[idx + 1][0] if idx + 1 < len(flat_anchors) else anchor_pos + 300
+            desc = reference_material[desc_start:next_pos].strip()[:200]
+
+            if 0 < mark <= 200:
+                add(raw_name, mark, desc, raw_mark=mark)
+
+        if criteria:
+            print(f"[RubricParser] Strategy 6 (flat pdfjs text): {len(criteria)} criteria")
+            return _normalise_to_weights(criteria)
+
+    print("[RubricParser] No structured criteria found -- will use rubric dict or defaults")
     return []
 
 
@@ -441,7 +523,7 @@ def classify_rubric_criteria(criteria: list[dict]) -> dict:
     Priority order: linguistics > coherence > content.
     If a criterion matches both linguistics and coherence keywords,
     it is assigned to linguistics (more specific bucket). This is intentional
-    and silent — no warning is raised.
+    and silent -- no warning is raised.
 
     Returns:
     {
@@ -513,7 +595,7 @@ def resolve_stage_weights(assignment) -> tuple[float, float, float, dict]:
             ]
 
     if not criteria:
-        print("[RubricRouter] No criteria found — using default weights 15/10/75")
+        print("[RubricRouter] No criteria found -- using default weights 15/10/75")
         return 15.0, 10.0, 75.0, {
             "linguistics": [], "coherence": [], "content": [],
             "linguistics_weight": 15.0, "coherence_weight": 10.0, "content_weight": 75.0,
@@ -550,7 +632,7 @@ def _format_criteria_for_prompt(criteria_list: list[dict]) -> str:
         return "Standard requirements for this category."
     lines = []
     for c in criteria_list:
-        desc = f" — {c['descriptor']}" if c.get("descriptor") else ""
+        desc = f" -- {c['descriptor']}" if c.get("descriptor") else ""
         lines.append(f"  - {c['name']} ({c['weight']}%){desc}")
     return "\n".join(lines)
 
@@ -564,7 +646,7 @@ def _format_stage0_checklist(checklist: list[str]) -> str:
 def _build_stage0_checklist_prompt(assignment, content_criteria: list[dict], rubric_content: str) -> str:
     """
     Builds the Stage 0 prompt using ONLY rubric_content (the marking key).
-    Reference material (books/notes) is intentionally excluded here — it is
+    Reference material (books/notes) is intentionally excluded here -- it is
     too noisy for checklist extraction. The marking key is the clean source.
     """
     title          = getattr(assignment, "title", "Untitled")
@@ -602,7 +684,7 @@ def _build_stage0_checklist_prompt(assignment, content_criteria: list[dict], rub
 def extract_stage0_checklist(assignment, content_criteria: list[dict], rubric_content: str) -> list[str]:
     """
     Extracts the marking key checklist from rubric_content ONLY.
-    Does not use reference_material (study notes) — that field is for
+    Does not use reference_material (study notes) -- that field is for
     contextual grading, not for extracting grading requirements.
     """
     if not rubric_content and not content_criteria:
@@ -636,9 +718,9 @@ def extract_stage0_checklist(assignment, content_criteria: list[dict], rubric_co
     return []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STAGE 1: GRAMMAR & VOCAB  (weight = linguistics_weight)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def call_phi3_ielts(essay_text: str, assignment=None, linguistics_criteria: list = None) -> tuple:
     """
@@ -653,7 +735,7 @@ def call_phi3_ielts(essay_text: str, assignment=None, linguistics_criteria: list
     print("[Stage 1] Calling Qwen router (IELTS examiner mode)...")
 
     router_prompt = f"""You are an expert IELTS examiner and linguistics specialist.
-Evaluate ONLY the language mechanics of this essay — grammar, vocabulary, and professional terminology.
+Evaluate ONLY the language mechanics of this essay -- grammar, vocabulary, and professional terminology.
 Do NOT assess content accuracy, argument quality, or topic relevance.
 
 Assignment Question: {question}
@@ -735,14 +817,14 @@ def parse_phi3_stage1_response(raw: str, s1_max: float) -> tuple:
         f"Score: {round(stage1_score, 2)} / {s1_max} pts\n"
         f"IELTS Band Equivalent: {band} / 9.0\n\n"
         f"Evaluator Comments:\n{clean_raw}\n\n"
-        f"{'—' * 60}\n\n"
+        f"{'--' * 30}\n\n"
     )
     return round(stage1_score, 2), feedback
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STAGE 2: TOPIC ALIGNMENT & COHERENCE  (weight = coherence_weight)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_stage2_qwen(
     essay_text: str,
@@ -835,7 +917,7 @@ Note: classification choices: "completely_on_topic", "partially_on_topic", "comp
         return clean_and_parse_json(raw_content)
 
     except Exception as e:
-        print(f"[Stage 2 Bypass] {e} — deploying defensive bypass.")
+        print(f"[Stage 2 Bypass] {e} -- deploying defensive bypass.")
         return {
             "is_on_topic":              True,
             "relevance_classification": "completely_on_topic",
@@ -844,9 +926,9 @@ Note: classification choices: "completely_on_topic", "partially_on_topic", "comp
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STAGE 3: GROQ — CONTENT, LOGIC & RUBRIC  (weight = content_weight)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STAGE 3: GROQ -- CONTENT, LOGIC & RUBRIC  (weight = content_weight)
+# -----------------------------------------------------------------------------
 
 def _format_assignment_rubric(assignment) -> str:
     rubric = getattr(assignment, "rubric", None)
@@ -923,7 +1005,7 @@ def _build_per_criterion_prompt(
     criteria_lines = []
     json_example_lines = []
     for c in criteria_with_pts:
-        desc = f" — {c['descriptor']}" if c.get("descriptor") else ""
+        desc = f" -- {c['descriptor']}" if c.get("descriptor") else ""
         criteria_lines.append(
             f'  * {c["name"]} | max {c["max_pts"]} pts ({c["weight"]}%){desc}'
         )
@@ -947,17 +1029,17 @@ def _build_per_criterion_prompt(
     return (
         f"You are a strict senior academic professor. Grade this essay criterion by criterion.\n"
         f"Grade ONLY content, argument quality, and subject-matter accuracy.\n"
-        f"Do NOT re-assess grammar, vocabulary, or basic structure — handled by other pipeline stages.\n\n"
+        f"Do NOT re-assess grammar, vocabulary, or basic structure -- handled by other pipeline stages.\n\n"
         f"ASSIGNMENT: {title}\n"
         f"INSTRUCTIONS: {instructions}\n"
         f"{rubric_key_block}{ref_block}{partial_note}"
-        f"CRITERIA TO GRADE — score each one independently:\n"
+        f"CRITERIA TO GRADE -- score each one independently:\n"
         f"{criteria_block_str}\n"
         f"{checklist_section}\n"
         f"STUDENT ESSAY:\n{essay_text}\n"
         f"WORD COUNT: {word_count}\n\n"
         f"SCORING RULES:\n"
-        f"- Score each criterion out of its stated maximum — do not blend criteria\n"
+        f"- Score each criterion out of its stated maximum -- do not blend criteria\n"
         f"- Completely absent criterion = 0\n"
         f"- Distinction level (all requirements met) = 90-100% of max\n"
         f"- Good (most requirements met, minor gaps) = 70-89% of max\n"
@@ -965,7 +1047,7 @@ def _build_per_criterion_prompt(
         f"- Weak (missing key elements) = 0-39% of max\n"
         f"- overall_critique must start with checklist summary if checklist provided,\n"
         f"  then explain each criterion: what was present, what was missing\n\n"
-        f"Respond with ONLY valid JSON — one key per criterion name plus overall_critique:\n"
+        f"Respond with ONLY valid JSON -- one key per criterion name plus overall_critique:\n"
         f"{{\n"
         f"{json_example_str},\n"
         f'  "overall_critique": "Summary critique referencing each criterion."\n'
@@ -1091,7 +1173,7 @@ def call_gemini_stage3(
     is_partially_on_topic: bool = False,
 ) -> dict:
     """
-    Stage 3 v5.3 — per-criterion scoring.
+    Stage 3 v5.3 -- per-criterion scoring.
 
     Each content criterion is scored individually up to its proportional
     share of s3_max. Stage 3 total = deterministic weighted sum of scores.
@@ -1116,7 +1198,7 @@ def call_gemini_stage3(
 
     # No criteria -> use thesis/evidence fallback
     if not content_criteria:
-        print("[Stage 3] No content criteria — using thesis/evidence fallback")
+        print("[Stage 3] No content criteria -- using thesis/evidence fallback")
         return _stage3_thesis_evidence_fallback(
             essay_text, assignment, word_count,
             s3_max, s3_thesis_max, s3_evidence_max,
@@ -1150,14 +1232,14 @@ def call_gemini_stage3(
                 result = _extract_criterion_scores(parsed, criteria_with_pts, is_partially_on_topic)
 
                 if result is None:
-                    print(f"[Stage 3] Score extraction failed — trying next model")
+                    print(f"[Stage 3] Score extraction failed -- trying next model")
                     continue
 
                 s3_total = result["s3_total"]
 
                 # Second-pass for long essays scoring unexpectedly low
                 if word_count >= 600 and s3_total < (s3_max * 0.53):
-                    print(f"[Stage 3] Long essay low ({s3_total}/{s3_max}) — verification pass...")
+                    print(f"[Stage 3] Long essay low ({s3_total}/{s3_max}) -- verification pass...")
                     try:
                         parsed2 = _call_groq_once(groq_client, model_name, prompt)
                         result2 = _extract_criterion_scores(parsed2, criteria_with_pts, is_partially_on_topic)
@@ -1182,7 +1264,7 @@ def call_gemini_stage3(
                         print(f"[Stage 3] Verification pass failed: {ve}")
 
                 critique = _strip_markdown(str(parsed.get("overall_critique", "")))
-                print(f"[Stage 3] Done via {model_name} — {result['s3_total']}/{s3_max}")
+                print(f"[Stage 3] Done via {model_name} -- {result['s3_total']}/{s3_max}")
 
                 return {
                     "criterion_scores":       result["criterion_scores"],
@@ -1193,12 +1275,12 @@ def call_gemini_stage3(
                 }
 
             except Exception as e:
-                print(f"[Stage 3] {model_name}: {e} — next...")
+                print(f"[Stage 3] {model_name}: {e} -- next...")
                 continue
 
-        print("[Stage 3] All Groq models failed — HF fallback...")
+        print("[Stage 3] All Groq models failed -- HF fallback...")
     else:
-        print("[Stage 3] Groq unavailable — HF fallback...")
+        print("[Stage 3] Groq unavailable -- HF fallback...")
 
     # HF fallback: get a single score, distribute proportionally
     fallback_prompt = (
@@ -1229,11 +1311,9 @@ def call_gemini_stage3(
     }
 
 
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # LEGACY FALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def call_huggingface(prompt: str) -> str:
     last_error = None
@@ -1307,9 +1387,9 @@ def grade_with_local_model(assignment, essay_text: str, word_count: int = 0) -> 
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SCORE BREAKDOWN HEADER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _build_score_breakdown(
     s1_points: float,
@@ -1357,13 +1437,13 @@ def _build_score_breakdown(
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MAIN DISPATCHER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count: int = 0, enable_stage0: bool = True) -> dict:
     """
-    v5.1 Rubric-aware ensemble grading pipeline.
+    v5.4 Rubric-aware ensemble grading pipeline.
 
     Stage weights are computed from the teacher's actual marking key / rubric.
     Each model grades only the criteria that belong to its specialty:
@@ -1374,19 +1454,17 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     Stage 0 optionally extracts an explicit rubric checklist that Stage 3 verifies.
     If no rubric/marking key is provided, defaults to 15 / 10 / 75 weights.
 
-    v5.1 fixes applied:
-      - cumulative_feedback initialised exactly once (Stage 0 feedback preserved)
-      - Stage 3 JSON keys are generic (thesis_score / evidence_score)
-      - coherence_score field has no misleading "out_of_10" suffix
-      - s3_thesis_max / s3_evidence_max computed once and passed into Stage 3
-      - Partial topic cap enforced in Stage 3 as well as Stage 2
-      - _strip_markdown() applied to all AI free-text in feedback output
+    v5.4 fix:
+      - Strategy 6 in parse_marking_key_from_reference() handles flat pdfjs
+        text that previously caused silent fallback to default 15/10/75 weights
+        and thesis/evidence scoring (manifesting as 19.2/35.8 Stage 3 scores
+        when a real rubric PDF is uploaded).
     """
     max_score = getattr(assignment, "max_score", None) or 100
 
     master_title        = getattr(assignment, "title", "") or ""
     master_instructions = getattr(assignment, "instructions", "") or ""
-    # v5.2: two separate fields — marking key and reference docs
+    # v5.2: two separate fields -- marking key and reference docs
     rubric_content      = getattr(assignment, "rubric_content", "") or ""
     reference_material  = getattr(assignment, "reference_material", "") or ""
 
@@ -1412,7 +1490,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     s3_thesis_max   = round(s3_max * 0.507, 0)
     s3_evidence_max = round(s3_max - s3_thesis_max, 0)
 
-    # cumulative_feedback initialised ONCE here (FIX v5.1 — was reset twice before)
+    # cumulative_feedback initialised ONCE here (FIX v5.1 -- was reset twice before)
     cumulative_feedback = []
 
     stage0_checklist = []
@@ -1426,13 +1504,13 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             "The following explicit checklist items were derived from the marking key "
             "and will be verified by Stage 3:\n"
             f"{_format_stage0_checklist(stage0_checklist)}\n\n"
-            f"{'—' * 60}\n\n"
+            f"{'--' * 30}\n\n"
         )
     elif enable_stage0:
         cumulative_feedback.append(
             "Stage 0: Rubric Checklist\n"
             "No explicit checklist items could be extracted from the marking key or rubric.\n\n"
-            f"{'—' * 60}\n\n"
+            f"{'--' * 30}\n\n"
         )
 
     # Human-readable labels for score breakdown
@@ -1440,7 +1518,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     s2_label = " & ".join(c["name"] for c in coherence_criteria)   if coherence_criteria   else "Topic Relevance & Coherence"
     s3_label = " & ".join(c["name"] for c in content_criteria)     if content_criteria     else "Thesis, Structure & Evidence"
 
-    print(f"[Pipeline v5.3] Stage weights: S1={s1_max}pts | S2={s2_max}pts | S3={s3_max}pts")
+    print(f"[Pipeline v5.4] Stage weights: S1={s1_max}pts | S2={s2_max}pts | S3={s3_max}pts")
 
     running_points         = 0.0
     hard_off_topic_tripped = False
@@ -1451,15 +1529,15 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
     is_partially_on_topic  = False
     qwen_data              = {}
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 1 — LINGUISTICS  (s1_max pts)
-    # ══════════════════════════════════════════════════════════════
+    # =========================================================================
+    # STAGE 1 -- LINGUISTICS  (s1_max pts)
+    # =========================================================================
     try:
         raw_phi3, model_name = call_phi3_ielts(essay_text, assignment, linguistics_criteria)
         s1_points, s1_fb     = parse_phi3_stage1_response(raw_phi3, s1_max)
         running_points      += s1_points
         cumulative_feedback.append(s1_fb)
-        print(f"Stage 1 complete — {s1_points}/{s1_max} pts via {model_name}")
+        print(f"Stage 1 complete -- {s1_points}/{s1_max} pts via {model_name}")
     except Exception as s1_err:
         print(f"Stage 1 failed: {s1_err}. Trying fallback router...")
         try:
@@ -1478,7 +1556,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
                 f"Stage 1: {s1_label} (Router Fallback)\n"
                 f"Score: {s1_points} / {s1_max} pts\n\n"
                 f"Comments: {_strip_markdown(raw_hf[:400])}\n\n"
-                f"{'—' * 60}\n\n"
+                f"{'--' * 30}\n\n"
             )
         except Exception:
             floor     = round(s1_max * 0.20, 1)
@@ -1488,12 +1566,12 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
                 f"Stage 1: {s1_label} (Emergency Baseline)\n"
                 f"Score: {s1_points} / {s1_max} pts\n\n"
                 f"System timed out. Conservative score applied.\n\n"
-                f"{'—' * 60}\n\n"
+                f"{'--' * 30}\n\n"
             )
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 2 — COHERENCE  (s2_max pts)
-    # ══════════════════════════════════════════════════════════════
+    # =========================================================================
+    # STAGE 2 -- COHERENCE  (s2_max pts)
+    # =========================================================================
     try:
         qwen_data    = run_stage2_qwen(
             essay_text, master_title, master_instructions,
@@ -1524,10 +1602,10 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             f"Score: {s2_coherence} / {s2_max} pts\n"
             f"Topic Classification: {classification.replace('_', ' ').title()}\n\n"
             f"Evaluator Rationale:\n{_strip_markdown(str(qwen_data.get('justification', '')))}\n\n"
-            f"{'—' * 60}\n\n"
+            f"{'--' * 30}\n\n"
         )
         cumulative_feedback.append(s2_fb)
-        print(f"Stage 2 complete — {s2_coherence}/{s2_max} pts | {classification}")
+        print(f"Stage 2 complete -- {s2_coherence}/{s2_max} pts | {classification}")
 
     except Exception as s2_err:
         s2_coherence        = round(s2_max * 0.55, 1)
@@ -1537,7 +1615,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             f"Stage 2: {s2_label}\n"
             f"Score: {s2_coherence} / {s2_max} pts\n\n"
             f"System timeout. Conservative baseline applied.\n\n"
-            f"{'—' * 60}\n\n"
+            f"{'--' * 30}\n\n"
         )
 
     # CIRCUIT BREAKER: Off-topic -> skip Stage 3
@@ -1559,10 +1637,10 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         )))
         cumulative_feedback.append(
             f"Stage 3: {s3_label}\n"
-            f"Score: 0 / {s3_max} pts — BYPASSED\n\n"
+            f"Score: 0 / {s3_max} pts -- BYPASSED\n\n"
             f"Grading halted: essay topic does not match the assignment prompt.\n\n"
             f"Pipeline stopped: {fail_rationale}\n\n"
-            f"{'—' * 60}\n\n"
+            f"{'--' * 30}\n\n"
         )
 
         return {
@@ -1574,9 +1652,9 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
             "graded_by":      "stage2-adversarial-abort",
         }
 
-    # ══════════════════════════════════════════════════════════════
-    # STAGE 3 — CONTENT & LOGIC  (s3_max pts)
-    # ══════════════════════════════════════════════════════════════
+    # =========================================================================
+    # STAGE 3 -- CONTENT & LOGIC  (s3_max pts)
+    # =========================================================================
     try:
         gemini_data = call_gemini_stage3(
             essay_text, assignment, word_count,
@@ -1633,7 +1711,6 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         )
         cumulative_feedback.append(s3_fb)
         print(f"Stage 3 complete -- {s3_total}/{s3_max} pts")
-        print(f"Stage 3 complete — {s3_total}/{s3_max} pts")
 
     except Exception as s3_err:
         print(f"Stage 3 failed: {s3_err}. Falling back to Qwen-72B router...")
@@ -1665,7 +1742,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
                 f"Stage 3: {s3_label} (Qwen Router Fallback)\n"
                 f"Score: {s3_total} / {s3_max} pts\n\n"
                 f"Feedback:\n{feedback_text[:700]}\n\n"
-                f"{'—' * 60}\n\n"
+                f"{'--' * 30}\n\n"
             )
         except Exception:
             s3_total_final  = round(s3_max * 0.40, 1)
@@ -1674,7 +1751,7 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
                 f"Stage 3: {s3_label} (Emergency Default)\n"
                 f"Score: {s3_total_final} / {s3_max} pts\n\n"
                 f"System unavailable. Conservative score applied.\n\n"
-                f"{'—' * 60}\n\n"
+                f"{'--' * 30}\n\n"
             )
 
     # Final score assembly
@@ -1694,5 +1771,5 @@ def grade_with_ai(prompt: str, assignment=None, essay_text: str = "", word_count
         "off_topic":      False,
         "ai_detected":    False,
         "low_confidence": False,
-        "graded_by":      "ensemble-pipeline-engine-v5.3",
+        "graded_by":      "ensemble-pipeline-engine-v5.4",
     }
